@@ -2,8 +2,8 @@
 查詢狀態: approved
 開始日期: 2026-07-06
 結束日期: 2026-07-15
-查詢類別:
-查詢船隻: angel101@gtmailplus.com
+查詢類別: KYC未通過
+查詢船隻: oceanace@gtmailplus.com
 排序欄位: date
 排序方向: desc
 ---
@@ -66,26 +66,61 @@ try {
 } catch (e) {}
 
 // ==========================================
-// 3. 更新按鈕
+// 3. 更新按鈕 (不用插件，直接跑 Git 指令)
 // ==========================================
 let updateBtn = controlContainer.createEl('button', {text: "📥 更新郵件"}); 
 updateBtn.style.cssText = "padding: 6px 15px; background: #2196F3; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;";
+
 updateBtn.onclick = async () => { 
+    // 1. 記錄執行前的檔案清單
     let beforePaths = dv.pages('"data_John"').file.path.array();
-    updateBtn.innerText = "⏳ 抓取中..."; updateBtn.style.backgroundColor = "#ff9800"; 
+    
+    updateBtn.innerText = "⏳ 抓取中..."; 
+    updateBtn.style.backgroundColor = "#ff9800"; 
+    
     const { exec } = require('child_process');
+    
+    // 第一步：執行爬蟲 AppleScript
     exec(`osascript "${basePath}/script.scpt"`, async (error) => { 
-        if (error) { new Notice('❌ 更新失敗'); updateBtn.innerText = "❌ 失敗"; }
-        else { 
-            updateBtn.innerText = "🔍 彙整中..."; await new Promise(r => setTimeout(r, 3000)); 
+        if (error) { 
+            new Notice('❌ 爬取失敗: ' + error.message); 
+            updateBtn.innerText = "❌ 失敗"; 
+        } else { 
+            updateBtn.innerText = "🔍 彙整中..."; 
+            await new Promise(r => setTimeout(r, 3000)); // 等待索引
+            
             let newPages = dv.pages('"data_John"').where(p => !beforePaths.includes(p.file.path));
+
+            // 第二步：彈窗詢問是否部署
+            if (confirm(`抓取完畢！新增了 ${newPages.length} 筆。是否要同步到 GitHub 網頁？`)) {
+                updateBtn.innerText = "📤 正在上傳...";
+                
+                // 直接執行 Git 指令串 (add + commit + push)
+                // 注意：這裡假設您的終端機已經具備 GitHub 推送權限
+                let gitCmd = `cd "${basePath}" && git add . && git commit -m "Auto update via button" && git push origin main`;
+                
+                exec(gitCmd, (gError, stdout, stderr) => {
+                    if (gError) {
+                        new Notice('❌ GitHub 同步失敗，請檢查權限');
+                        console.error(gError);
+                    } else {
+                        new Notice('✅ 網頁同步成功！');
+                    }
+                });
+            }
+
+            // 顯示報告
             if (newPages.length > 0) {
                 reportArea.innerHTML = `<b>📊 更新完成：新增 ${newPages.length} 筆郵件</b><br><hr>` + newPages.map(p => `📄 ${p.subject}`).join("<br>");
                 reportArea.style.display = "block";
             }
-            updateBtn.innerText = "✅ 完成"; updateBtn.style.backgroundColor = "#4CAF50"; 
+            updateBtn.innerText = "✅ 完成"; 
+            updateBtn.style.backgroundColor = "#4CAF50"; 
         } 
-        setTimeout(() => { updateBtn.innerText = "📥 更新郵件"; updateBtn.style.backgroundColor = "#2196F3"; }, 5000); 
+        setTimeout(() => { 
+            updateBtn.innerText = "📥 更新郵件"; 
+            updateBtn.style.backgroundColor = "#2196F3"; 
+        }, 5000); 
     }); 
 };
 
