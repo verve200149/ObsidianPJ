@@ -77,7 +77,7 @@ def load_all_data():
 df = load_all_data()
 
 # --- 3. 介面與篩選器 (響應式佈局) ---
-st.title("油輪即時預報查詢")
+st.title("預報清單")
 
 if df.empty:
     st.warning("⚠️ 尚無資料")
