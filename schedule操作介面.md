@@ -1,10 +1,23 @@
 ```dataviewjs
 // ==========================================
-// 1. 基礎設定與 CSS 注入
+// 1. 基礎設定與 CSS 注入 (含載入重試機制)
 // ==========================================
 let currentPage = dv.current();
 if (!currentPage || !currentPage.file) {
-    dv.paragraph("⏳ 系統載入中...");
+    let loadingPara = dv.paragraph("⏳ 系統載入中...（Dataview 索引建立中，稍候會自動重新整理）");
+    let retryCount = 0;
+    const tryReload = () => {
+        retryCount++;
+        let retryPage = dv.current();
+        if (retryPage && retryPage.file) {
+            dv.app.workspace.trigger("dataview:refresh-views");
+        } else if (retryCount < 10) {
+            setTimeout(tryReload, 800);
+        } else {
+            loadingPara.innerText = "⚠️ 索引一直沒建立完成。請試著在命令面板執行「Dataview: Rebuild current index / Force refresh」。";
+        }
+    };
+    setTimeout(tryReload, 800);
     return;
 }
 
@@ -31,6 +44,8 @@ if (!styleEl) {
 
 let file = app.vault.getAbstractFileByPath(currentPage.file.path);
 const fs = require('fs');
+const { exec } = require('child_process');
+const basePath = app.vault.adapter.getBasePath();
 
 // --- 建立控制面板 ---
 let controlContainer = this.container.createEl("div");
@@ -43,7 +58,6 @@ reportArea.style.cssText = "display: none; margin-bottom: 15px; padding: 15px; b
 // 2. 獲取 Kingdee JSON 資料
 // ==========================================
 let shipMap = {};
-const basePath = app.vault.adapter.getBasePath();
 try {
     const jsonPath = fs.existsSync(`${basePath}/Kingdee_Export_UTF8.json`) ? `${basePath}/Kingdee_Export_UTF8.json` : `${basePath}/../Kingdee_Export_UTF8.json`;
     if (fs.existsSync(jsonPath)) {
@@ -56,61 +70,79 @@ try {
 } catch (e) {}
 
 // ==========================================
-// 3. 更新按鈕 (不用插件，直接跑 Git 指令)
+// 3. 🚀 更新按鈕 (修正 Log 讀取與 GitHub 觸發)
 // ==========================================
 let updateBtn = controlContainer.createEl('button', {text: "📥 更新郵件"}); 
 updateBtn.style.cssText = "padding: 6px 15px; background: #2196F3; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;";
 
 updateBtn.onclick = async () => { 
-    // 1. 記錄執行前的檔案清單
+    // 拍照：記錄更新前的檔案清單
     let beforePaths = dv.pages('"data_John"').file.path.array();
     
     updateBtn.innerText = "⏳ 抓取中..."; 
     updateBtn.style.backgroundColor = "#ff9800"; 
+    reportArea.style.display = "none";
     
-    const { exec } = require('child_process');
-    
-    // 第一步：執行爬蟲 AppleScript
     exec(`osascript "${basePath}/script.scpt"`, async (error) => { 
         if (error) { 
             new Notice('❌ 爬取失敗: ' + error.message); 
             updateBtn.innerText = "❌ 失敗"; 
-        } else { 
-            updateBtn.innerText = "🔍 彙整中..."; 
-            await new Promise(r => setTimeout(r, 3000)); // 等待索引
-            
-            let newPages = dv.pages('"data_John"').where(p => !beforePaths.includes(p.file.path));
+            setTimeout(() => { updateBtn.innerText = "📥 更新郵件"; updateBtn.style.backgroundColor = "#2196F3"; }, 5000);
+            return;
+        }
 
-            // 第二步：彈窗詢問是否部署
-            if (confirm(`抓取完畢！新增了 ${newPages.length} 筆。是否要同步到 GitHub 網頁？`)) {
-                updateBtn.innerText = "📤 正在上傳...";
-                
-                // 直接執行 Git 指令串 (add + commit + push)
-                // 注意：這裡假設您的終端機已經具備 GitHub 推送權限
-                let gitCmd = `cd "${basePath}" && git add . && git commit -m "Auto update via button" && git push origin main`;
-                
-                exec(gitCmd, (gError, stdout, stderr) => {
-                    if (gError) {
-                        new Notice('❌ GitHub 同步失敗，請檢查權限');
-                        console.error(gError);
-                    } else {
-                        new Notice('✅ 網頁同步成功！');
-                    }
-                });
-            }
+        updateBtn.innerText = "🔍 讀取紀錄...";
+        await new Promise(r => setTimeout(r, 3500)); // 等待 Obsidian 建立新檔案索引
 
-            // 顯示報告
-            if (newPages.length > 0) {
-                reportArea.innerHTML = `<b>📊 更新完成：新增 ${newPages.length} 筆郵件</b><br><hr>` + newPages.map(p => `📄 ${p.subject}`).join("<br>");
-                reportArea.style.display = "block";
+        // 🚀 修正點 1：正確的路徑 (根目錄)
+        let logPath = `${basePath}/update_log.json`;
+        let lastId = 0, updateTime = "-";
+        try {
+            if (fs.existsSync(logPath)) {
+                let logContent = fs.readFileSync(logPath, 'utf8');
+                let log = JSON.parse(logContent);
+                lastId = log.last_id || 0;
+                updateTime = log.update_time || "-";
             }
+        } catch (e) {
+            console.error("Log 讀取失敗", e);
+            new Notice('⚠️ 讀不到 update_log.json，請確認 AppleScript 有正確執行。');
+        }
+
+        // 🚀 修正點 2：比對新舊清單，精準算出新增了幾筆
+        let newPages = dv.pages('"data_John"').where(p => !beforePaths.includes(p.file.path));
+        let newCount = newPages.length;
+
+        // 顯示報告
+        reportArea.innerHTML = `<b>📊 更新完成：新增 ${newCount} 筆郵件</b><br>系統最後更新時間：${updateTime}<br><hr>` +
+            (newCount > 0 ? newPages.map(p => `📄 ${p.subject}`).join("<br>") : "（本次沒有新郵件）");
+        reportArea.style.display = "block";
+
+        // 🚀 修正點 3：無論有沒有新信，都詢問是否要同步 (防呆機制)
+        let confirmMsg = newCount > 0 
+            ? `抓取完畢！最新編號：${lastId}\n本次新增：${newCount} 筆。\n\n是否同步到 GitHub 網頁？` 
+            : `抓取完畢！最新編號：${lastId}\n本次沒有新增郵件。\n\n是否仍要強制同步 GitHub？`;
+
+        if (confirm(confirmMsg)) {
+            updateBtn.innerText = "📤 正在上傳...";
+            // 🚀 確保 push 資料夾與 log
+            let gitCmd = `cd "${basePath}" && git add data_John update_log.json Kingdee_Export_UTF8.json .gitignore && git commit -m "Auto update via button (ID: ${lastId})" && git push origin main`;
+            exec(gitCmd, (gError, stdout, stderr) => {
+                if (gError) {
+                    new Notice('❌ GitHub 同步失敗，請檢查權限');
+                    console.error(gError, stderr);
+                    updateBtn.innerText = "❌ 同步失敗";
+                } else {
+                    new Notice('✅ 網頁同步成功！');
+                    updateBtn.innerText = "✅ 同步完成";
+                }
+            });
+        } else {
             updateBtn.innerText = "✅ 完成"; 
-            updateBtn.style.backgroundColor = "#4CAF50"; 
-        } 
-        setTimeout(() => { 
-            updateBtn.innerText = "📥 更新郵件"; 
-            updateBtn.style.backgroundColor = "#2196F3"; 
-        }, 5000); 
+        }
+
+        updateBtn.style.backgroundColor = "#4CAF50"; 
+        setTimeout(() => { updateBtn.innerText = "📥 更新郵件"; updateBtn.style.backgroundColor = "#2196F3"; }, 5000); 
     }); 
 };
 
@@ -118,7 +150,6 @@ updateBtn.onclick = async () => {
 // 4. 篩選器 UI (日期、類別、油輪)
 // ==========================================
 
-// 日期區間 (純手刻 popup 日曆，單一欄位、無外部依賴，不會被 CSP 擋)
 controlContainer.createEl("span", {text: "📅 範圍：", attr: {style: "font-weight: bold; margin-left: 5px;"}});
 let dateRangeInput = controlContainer.createEl("input", {type: "text"});
 dateRangeInput.readOnly = true;
@@ -127,14 +158,13 @@ dateRangeInput.value = (currentPage.開始日期 && currentPage.結束日期) ? 
 
 let rangeStart = currentPage.開始日期 || null;
 let rangeEnd = currentPage.結束日期 || null;
-let pickingStart = null; // 暫存第一次點擊的日期，用來判斷是選起點還是終點
+let pickingStart = null; 
 
 let popup = document.createElement("div");
 popup.style.cssText = "position: absolute; z-index: 999; display: none; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); padding: 10px; width: 240px;";
 document.body.appendChild(popup);
 
 let viewDate = rangeStart ? new Date(rangeStart) : new Date();
-
 const pad2 = n => String(n).padStart(2, "0");
 const toISO = d => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
 
@@ -181,20 +211,13 @@ const renderCalendar = () => {
         cell.onclick = async (e) => {
             e.stopPropagation();
             if (!pickingStart) {
-                // 第一次點擊：設為起點，清空舊區間
-                pickingStart = iso;
-                rangeStart = iso;
-                rangeEnd = null;
+                pickingStart = iso; rangeStart = iso; rangeEnd = null;
             } else {
-                // 第二次點擊：決定起訖 (自動排序)
                 rangeEnd = iso > pickingStart ? iso : pickingStart;
                 rangeStart = iso > pickingStart ? pickingStart : iso;
                 pickingStart = null;
                 dateRangeInput.value = `${rangeStart} ~ ${rangeEnd}`;
-                await app.fileManager.processFrontMatter(file, fm => {
-                    fm["開始日期"] = rangeStart;
-                    fm["結束日期"] = rangeEnd;
-                });
+                await app.fileManager.processFrontMatter(file, fm => { fm["開始日期"] = rangeStart; fm["結束日期"] = rangeEnd; });
                 popup.style.display = "none";
             }
             renderCalendar();
@@ -207,22 +230,15 @@ const renderCalendar = () => {
 dateRangeInput.onclick = (e) => {
     e.stopPropagation();
     if (popup.style.display === "none") {
-        // 每次打開都完全重新開始：清空選取狀態與範圍高亮，不沿用上次結果
-        pickingStart = null;
-        rangeStart = null;
-        rangeEnd = null;
+        pickingStart = null; rangeStart = null; rangeEnd = null;
         let rect = dateRangeInput.getBoundingClientRect();
-        popup.style.left = `${rect.left}px`;
-        popup.style.top = `${rect.bottom + 4}px`;
-        renderCalendar();
-        popup.style.display = "block";
+        popup.style.left = `${rect.left}px`; popup.style.top = `${rect.bottom + 4}px`;
+        renderCalendar(); popup.style.display = "block";
     } else {
         popup.style.display = "none";
     }
 };
-document.addEventListener("click", (e) => {
-    if (!popup.contains(e.target) && e.target !== dateRangeInput) popup.style.display = "none";
-});
+document.addEventListener("click", (e) => { if (!popup.contains(e.target) && e.target !== dateRangeInput) popup.style.display = "none"; });
 
 // 類別選單
 controlContainer.createEl("span", {text: "📂 狀態：", attr: {style: "font-weight: bold; margin-left: 5px;"}});
@@ -244,7 +260,7 @@ let shipSelect = controlContainer.createEl("select");
 shipSelect.onchange = async (e) => { await app.fileManager.processFrontMatter(file, fm => { fm["查詢船隻"] = e.target.value === "全部" ? null : e.target.value; }); };
 
 // ==========================================
-// 5. 🚀 新增排序檢索 UI
+// 5. 排序檢索 UI
 // ==========================================
 controlContainer.createEl("span", {text: "🔃 排序：", attr: {style: "font-weight: bold; margin-left: 5px;"}});
 let sortFieldSelect = controlContainer.createEl("select");
@@ -261,10 +277,7 @@ let sortDirSelect = controlContainer.createEl("select");
 });
 
 const updateSort = async () => {
-    await app.fileManager.processFrontMatter(file, fm => {
-        fm["排序欄位"] = sortFieldSelect.value;
-        fm["排序方向"] = sortDirSelect.value;
-    });
+    await app.fileManager.processFrontMatter(file, fm => { fm["排序欄位"] = sortFieldSelect.value; fm["排序方向"] = sortDirSelect.value; });
 };
 sortFieldSelect.onchange = updateSort;
 sortDirSelect.onchange = updateSort;
@@ -272,8 +285,6 @@ sortDirSelect.onchange = updateSort;
 // ==========================================
 // 6. 資料處理與排序邏輯
 // ==========================================
-
-// 把 target 字串 (可能包含多艘船，用 " | " 分隔) 拆成多筆 {fv, imo}
 const parseShipEntries = (target) => {
     if (!target || target === "(本次無資料)") return [{ fv: "-", imo: "-" }];
     let segments = target.split(/\s*\|\s*/).filter(s => s.trim() !== "");
@@ -285,7 +296,6 @@ const parseShipEntries = (target) => {
     });
 };
 
-// 先做「頁面層級」的篩選 (日期、油輪)，跟船隻數量無關
 let basePages = dv.pages('"data_John"')
     .where(p => p.file.path !== currentPage.file.path)
     .where(p => {
@@ -299,30 +309,21 @@ let basePages = dv.pages('"data_John"')
         return true;
     });
 
-// 攤平：一封信有幾艘船，就展開成幾筆 entry，每筆各自查 JSON、各自判斷狀態
 let allEntries = [];
 for (let p of basePages) {
     let shipEntries = parseShipEntries(p.target);
     for (let s of shipEntries) {
         let isKycFail = (s.imo !== "-" && !shipMap[s.imo]);
         let statusText = isKycFail ? "KYC未通過" : (p.category ? p.category.toUpperCase() : "PENDING");
-        allEntries.push({
-            page: p,
-            fv: s.fv,
-            imo: s.imo,
-            isKycFail,
-            statusText
-        });
+        allEntries.push({ page: p, fv: s.fv, imo: s.imo, isKycFail, statusText });
     }
 }
 
-// 狀態篩選 (現在是針對每一艘船，而不是整封信)
 let entries = allEntries.filter(en => {
     if (currentPage.查詢類別 && currentPage.查詢類別 !== "全部" && en.statusText !== currentPage.查詢類別) return false;
     return true;
 });
 
-// 執行排序
 let sField = currentPage.排序欄位 || "date";
 let sDir = currentPage.排序方向 || "desc";
 const statusRank = { "KYC未通過": 0, "APPROVED": 1, "COMPLETED": 2, "CANCELLED": 3 };
@@ -339,12 +340,9 @@ if (sField === "date") {
     });
 }
 
-// 格式化日期顯示：優先用 Dataview 的 toFormat()（正確處理時間/時區），沒有的話 fallback 用字串切法
 const formatDateDisplay = (d) => {
     if (!d) return "-";
-    if (typeof d.toFormat === "function") {
-        return d.toFormat("MM|dd");
-    }
+    if (typeof d.toFormat === "function") return d.toFormat("MM|dd");
     let datePart = String(d).split("T")[0];
     let segments = datePart.split("-");
     return segments.length >= 3 ? `${segments[1]}|${segments[2]}` : segments.join("|");
@@ -380,7 +378,6 @@ for (let en of entries) {
 
 dv.table(["油輪", "日期", "位置", "船名", "狀態", "ETA", "IMO", "呼號", "主旨"], rows);
 
-// 匯出按鈕
 let exportBtn = controlContainer.createEl('button', {text: "📊 匯出"}); 
 exportBtn.style.cssText = "margin-left: auto; padding: 5px 12px; background: #4CAF50; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;";
 exportBtn.onclick = () => { 
