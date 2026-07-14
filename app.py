@@ -24,8 +24,11 @@ st.markdown("""
 # --- 1. 讀取 Update Log ---
 def load_update_log():
     if os.path.exists('update_log.json'):
-        with open('update_log.json', 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open('update_log.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return None
     return None
 
 # --- 2. 讀取 Kingdee JSON ---
@@ -88,19 +91,26 @@ def load_all_data():
 # --- 介面渲染 ---
 st.title("🚢 船隊實時調度報表")
 
-# 🚀 顯示 Log 區
+# 先載入 dataframe 以便計算總筆數
+df = load_all_data()
+
+# 🚀 顯示 Log 區 (對接最新版 AppleScript 的 JSON 格式)
 log = load_update_log()
 if log:
+    # 讀取 AppleScript 新寫入的 key
+    last_run = log.get('lastRun', '未知')
+    success_cnt = log.get('successCount', 0)
+    skip_cnt = log.get('skipCount', 0)
+    error_cnt = log.get('errorCount', 0)
+    
     st.markdown(f"""
     <div class="log-container">
-        📡 系統日誌：<br>
-        • 最後更新時間：{log.get('update_time')}<br>
-        • 最新郵件編號：ID {log.get('last_id')}<br>
-        • 資料庫總筆數：{log.get('total_files')} 封郵件
+        📡 <b>系統同步日誌：</b><br>
+        • 地端最後抓取時間：{last_run}<br>
+        • 上次執行結果：新增 {success_cnt} 筆 / 略過 {skip_cnt} 筆 / 錯誤 {error_cnt} 筆<br>
+        • 網頁資料庫總計：{len(df)} 筆有效紀錄
     </div>
     """, unsafe_allow_html=True)
-
-df = load_all_data()
 
 if not df.empty:
     c1, c2, c3 = st.columns([1, 1, 1.5])
