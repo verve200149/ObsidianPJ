@@ -16,7 +16,7 @@ st.markdown("""
     .block-container { padding-top: 1rem; padding-bottom: 1rem; }
     [data-testid="stMetricValue"] { font-size: 1.5rem; }
     </style>
-    """, unsafe_allow_stdio=True)
+    """, unsafe_allow_html=True)  # <--- 這裡原本寫錯了，請改成 unsafe_allow_html
 
 # --- 2. 數據加載 (維持原有邏輯但增加快取穩定性) ---
 @st.cache_data(ttl=600)
