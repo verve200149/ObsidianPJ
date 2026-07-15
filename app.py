@@ -1,23 +1,56 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
-import os, yaml, json, re
+import os, yaml, json, re, subprocess
 from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="船隊調度管理系統")
+# 建議將網頁預設為寬螢幕佈局
+st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
-# 自定義 CSS (增加 Log 區樣式)
+# 自定義 CSS (打造清爽的郵箱風格 UI)
 st.markdown("""
     <style>
-    .log-container {
-        background-color: #0e1117;
-        padding: 10px 15px;
-        border-radius: 5px;
-        border-left: 5px solid #2196F3;
-        margin-bottom: 20px;
-        font-family: monospace;
-        font-size: 13px;
+    /* 調整指標數字大小與顏色 (商務藍) */
+    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
+    
+    /* 隱藏預設的 DataFrame index */
+    .row_heading.level0 {display:none}
+    .blank {display:none}
+    
+    /* 右側郵件閱讀器的精美樣式 */
+    .email-pane { 
+        background-color: #ffffff; 
+        color: #333333; 
+        padding: 25px; 
+        border-radius: 8px; 
+        border: 1px solid #e0e0e0;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+        height: 500px;
+        box-sizing: border-box;
+        overflow-y: auto;
     }
-    .email-body { background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; white-space: pre-wrap; font-family: monospace; }
+    .email-header {
+        border-bottom: 1px solid #eeeeee;
+        padding-bottom: 12px;
+        margin-bottom: 20px;
+    }
+    .email-subject { 
+        font-size: 1.3em; 
+        font-weight: bold; 
+        color: #202124; 
+        margin-bottom: 8px;
+    }
+    .email-meta {
+        font-size: 0.9em; 
+        color: #5f6368; 
+    }
+    .email-body {
+        white-space: pre-wrap; 
+        font-family: 'Consolas', 'Courier New', monospace; 
+        font-size: 14px;
+        line-height: 1.6;
+        color: #444444;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -43,9 +76,22 @@ def load_ship_map():
 
 ship_map = load_ship_map()
 
-# --- 3. 解析郵件邏輯 ---
+# --- 3. 解析工具 ---
+def clean_mail_field(raw):
+    """把 Obsidian 常見的 Markdown 連結格式 [顯示文字](mailto:xxx) 還原成純文字，
+    避免直接 split('@') 時抓到帶有中括號的錯誤字串。"""
+    if not raw:
+        return ""
+    raw = str(raw)
+    raw = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', raw)
+    return raw.strip()
+
 def parse_ship_entries(target):
-    if not target or str(target).strip() == "(本次無資料)": return [{"fv": "-", "imo": "-"}]
+    """解析 target 欄位。若本次沒有實際船隻資料 (本次無資料)，
+    仍回傳一筆佔位資料，讓這封信在前端能被分類、被看見，
+    而不是直接消失。"""
+    if not target or str(target).strip() == "(本次無資料)":
+        return [{"fv": "(本次無資料)", "imo": "-"}]
     segments = [s.strip() for s in str(target).split('|') if s.strip()]
     res = []
     for seg in segments:
@@ -58,95 +104,329 @@ def parse_ship_entries(target):
 @st.cache_data(ttl=60)
 def load_all_data():
     rows = []
+    parse_errors = []
     for root, _, files in os.walk('.'):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
         for file in files:
-            if file.endswith('.md') and file != 'checklist.md':
-                try:
-                    with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
-                        raw_text = f.read()
-                        if raw_text.startswith('---'):
-                            parts = raw_text.split('---')
-                            fm = yaml.safe_load(parts[1])
-                            body = parts[2].strip()
-                            ships = parse_ship_entries(fm.get('target', ''))
-                            for s in ships:
-                                s_info = ship_map.get(s['imo'], {})
-                                is_kyc_fail = (s['imo'] != "-" and s['imo'] not in ship_map)
-                                rows.append({
-                                    "油輪": str(fm.get('ships', '')).split('@')[0],
-                                    "日期": pd.to_datetime(fm.get('date')).date() if fm.get('date') else None,
-                                    "位置": fm.get('Position', '-'),
-                                    "船名": s_info.get('name', s['fv']),
-                                    "狀態": "KYC未通過" if is_kyc_fail else str(fm.get('category', 'PENDING')).upper(),
-                                    "ETA": fm.get('ETA', '-'),
-                                    "IMO": s['imo'],
-                                    "呼號": s_info.get('callSign', "-"),
-                                    "主旨": fm.get('subject', '-'),
-                                    "原始內文": body
-                                })
-                except: continue
-    return pd.DataFrame(rows)
+            if not (file.endswith('.md') and file != 'checklist.md'):
+                continue
+            fpath = os.path.join(root, file)
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    raw_text = f.read()
+
+                if not raw_text.startswith('---'):
+                    parse_errors.append((fpath, "找不到 YAML frontmatter (檔案未以 --- 開頭)"))
+                    continue
+
+                parts = raw_text.split('---')
+                if len(parts) < 3:
+                    parse_errors.append((fpath, "YAML frontmatter 格式不完整 (--- 數量不足)"))
+                    continue
+
+                fm = yaml.safe_load(parts[1])
+                if not fm:
+                    parse_errors.append((fpath, "YAML 解析結果為空"))
+                    continue
+
+                # 內文可能自己就含有 '---'（例如簽名分隔線），
+                # 用 join 把第 2 個 '---' 之後的內容全部接回來，避免內文被截斷。
+                body = '---'.join(parts[2:]).strip()
+
+                ships = parse_ship_entries(fm.get('target', ''))
+                for s in ships:
+                    s_info = ship_map.get(s['imo'], {})
+                    is_kyc_fail = (s['imo'] != "-" and s['imo'] not in ship_map)
+                    rows.append({
+                        "油輪": clean_mail_field(fm.get('ships', '')).split('@')[0] or '-',
+                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT,
+                        "位置": fm.get('Position', '-') or '-',
+                        "船名": s_info.get('name', s['fv']),
+                        "狀態": "KYC未通過" if is_kyc_fail else str(fm.get('category', 'PENDING')).upper(),
+                        "ETA": fm.get('ETA', '-') or '-',
+                        "IMO": s['imo'],
+                        "呼號": s_info.get('callSign', "-"),
+                        "主旨": fm.get('subject', '-'),
+                        "原始內文": body
+                    })
+            except Exception as e:
+                parse_errors.append((fpath, f"{type(e).__name__}: {e}"))
+                continue
+    return pd.DataFrame(rows), parse_errors
+
+# --- 4. Git 拉取最新資料 ---
+def git_pull_latest():
+    """嘗試從 GitHub 拉取最新的資料檔案。回傳 (成功與否, 訊息)"""
+    if not os.path.exists('.git'):
+        return None, "目前目錄不是 Git repo，略過 git pull。"
+    try:
+        result = subprocess.run(
+            ['git', 'pull'],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip() or "已是最新版本。"
+        else:
+            return False, result.stderr.strip() or "git pull 失敗。"
+    except Exception as e:
+        return False, f"執行 git pull 發生錯誤：{e}"
+
+# --- 5. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示，
+#         避免每次選取都造成整頁重新排版、瞬間跳動的問題) ---
+def apply_split_layout(marker_id: str, n_selected: int):
+    js = f"""
+    <script>
+    (function() {{
+        function findTargetBlock(doc, marker) {{
+            const allBlocks = Array.from(doc.querySelectorAll('[data-testid="stHorizontalBlock"]'));
+            for (const b of allBlocks) {{
+                if (marker.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) return b;
+            }}
+            return null;
+        }}
+
+        function setupHandle(doc, hBlock, id, left, right) {{
+            let h = hBlock.querySelector('#' + id);
+            if (h) return h;
+            h = doc.createElement('div');
+            h.id = id;
+            h.style.cssText = 'flex:0 0 8px;width:8px;cursor:col-resize;position:relative;z-index:999;display:flex;align-items:center;justify-content:center;';
+            h.innerHTML = '<div style="width:2px;height:32px;background:#4a4a4a;border-radius:2px;pointer-events:none;"></div>';
+            h.addEventListener('mouseenter', () => {{ h.firstChild.style.background = '#1a73e8'; }});
+            h.addEventListener('mouseleave', () => {{ if (!h.dataset.dragging) h.firstChild.style.background = '#4a4a4a'; }});
+            h.addEventListener('mousedown', (e) => {{
+                h.dataset.dragging = '1';
+                h.firstChild.style.background = '#1a73e8';
+                doc.body.style.userSelect = 'none';
+                e.preventDefault();
+                const onMove = (ev) => {{
+                    const lRect = left.getBoundingClientRect();
+                    const rRect = right.getBoundingClientRect();
+                    const combinedLeft = lRect.left;
+                    const combinedWidth = rRect.right - lRect.left;
+                    let newLeftWidth = ev.clientX - combinedLeft;
+                    const minW = 80;
+                    if (newLeftWidth < minW) newLeftWidth = minW;
+                    if (newLeftWidth > combinedWidth - minW) newLeftWidth = combinedWidth - minW;
+                    const pct = newLeftWidth / combinedWidth;
+                    left.style.flex = pct + ' 1 0px';
+                    right.style.flex = (1 - pct) + ' 1 0px';
+                }};
+                const onUp = () => {{
+                    h.dataset.dragging = '';
+                    h.firstChild.style.background = '#4a4a4a';
+                    doc.body.style.userSelect = '';
+                    doc.removeEventListener('mousemove', onMove);
+                    doc.removeEventListener('mouseup', onUp);
+                }};
+                doc.addEventListener('mousemove', onMove);
+                doc.addEventListener('mouseup', onUp);
+            }});
+            right.parentNode.insertBefore(h, right);
+            return h;
+        }}
+
+        let attempts = 0;
+        function init() {{
+            attempts++;
+            const doc = window.parent.document;
+            const marker = doc.getElementById('{marker_id}');
+            if (!marker) {{ if (attempts < 30) setTimeout(init, 80); return; }}
+            const hBlock = findTargetBlock(doc, marker);
+            if (!hBlock) {{ if (attempts < 30) setTimeout(init, 80); return; }}
+            const cols = Array.from(hBlock.children).filter(c => c.getAttribute && c.getAttribute('data-testid') === 'stColumn');
+            if (cols.length < 3) {{ if (attempts < 30) setTimeout(init, 80); return; }}
+
+            hBlock.style.display = 'flex';
+            hBlock.style.alignItems = 'stretch';
+            const [c0, c1, c2] = cols;
+            [c0, c1, c2].forEach(c => {{ c.style.overflow = 'hidden'; c.style.minWidth = '0'; c.style.transition = 'none'; }});
+
+            const handle1 = setupHandle(doc, hBlock, 'split-handle-1', c0, c1);
+            const handle2 = setupHandle(doc, hBlock, 'split-handle-2', c1, c2);
+
+            const n = {n_selected};
+            if (n === 0) {{
+                c0.style.flex = '1 1 100%'; c0.style.display = '';
+                c1.style.display = 'none';
+                c2.style.display = 'none';
+                handle1.style.display = 'none';
+                handle2.style.display = 'none';
+            }} else if (n === 1) {{
+                c0.style.display = ''; c1.style.display = ''; c2.style.display = 'none';
+                c0.style.flex = '1 1 0px'; c1.style.flex = '1 1 0px';
+                handle1.style.display = 'flex';
+                handle2.style.display = 'none';
+            }} else {{
+                c0.style.display = ''; c1.style.display = ''; c2.style.display = '';
+                c0.style.flex = '1 1 0px'; c1.style.flex = '1 1 0px'; c2.style.flex = '1 1 0px';
+                handle1.style.display = 'flex';
+                handle2.style.display = 'flex';
+            }}
+        }}
+        setTimeout(init, 60);
+    }})();
+    </script>
+    """
+    components.html(js, height=0, width=0)
 
 # --- 介面渲染 ---
 st.title("🚢 船隊實時調度報表")
 
-# 先載入 dataframe 以便計算總筆數
-df = load_all_data()
+# 側邊欄：刷新按鈕
+if st.sidebar.button("🔄 立即刷新資料庫"):
+    ok, msg = git_pull_latest()
+    if ok is None:
+        st.sidebar.info(msg)
+    elif ok:
+        st.sidebar.success(f"✅ Git pull 完成：{msg}")
+    else:
+        st.sidebar.error(f"❌ Git pull 失敗：{msg}")
+    st.cache_data.clear()
+    st.rerun()
 
-# 🚀 顯示 Log 區 (對接最新版 AppleScript 的 JSON 格式)
+# 載入資料庫
+df, parse_errors = load_all_data()
+
+if parse_errors:
+    with st.sidebar.expander(f"⚠️ 解析失敗的信件 ({len(parse_errors)} 筆)"):
+        for fpath, err in parse_errors:
+            st.write(f"`{fpath}`")
+            st.caption(err)
+
+# 數據看板 (Metrics)
 log = load_update_log()
 if log:
-    # 讀取 AppleScript 新寫入的 key
-    last_run = log.get('lastRun', '未知')
-    success_cnt = log.get('successCount', 0)
-    skip_cnt = log.get('skipCount', 0)
-    error_cnt = log.get('errorCount', 0)
+    update_time = log.get('update_time', '未知')
+    total_files = log.get('total_files', 0)
+    latest_date_str = log.get('latest_date_str', '未知')
+    latest_emails = log.get('latest_emails', 0)
+    latest_imos = log.get('latest_imos', 0)
+    latest_nodata = log.get('latest_nodata', 0)
     
-    st.markdown(f"""
-    <div class="log-container">
-        📡 <b>系統同步日誌：</b><br>
-        • 地端最後抓取時間：{last_run}<br>
-        • 上次執行結果：新增 {success_cnt} 筆 / 略過 {skip_cnt} 筆 / 錯誤 {error_cnt} 筆<br>
-        • 網頁資料庫總計：{len(df)} 筆有效紀錄
-    </div>
-    """, unsafe_allow_html=True)
+    total_targets = latest_imos + latest_nodata
+    
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("📁 總信件庫", f"{total_files} 封")
+    col_m2.metric(f"📅 最新 ({latest_date_str})", f"{latest_emails} 封")
+    col_m3.metric("🚢 最新解析油輪", f"{total_targets} 筆")
+    col_m4.metric("⏱️ 最後同步時間", update_time)
+
+st.divider()
 
 if not df.empty:
+    # 頂部篩選器
     c1, c2, c3 = st.columns([1, 1, 1.5])
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
-        sel_tanker = st.selectbox("🚢 油輪", tankers)
+        sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
     with c2:
-        sel_status = st.selectbox("📂 狀態", ["全部", "APPROVED", "COMPLETED", "CANCELLED", "KYC未通過"])
+        sel_status = st.selectbox("📂 篩選狀態", ["全部", "APPROVED", "COMPLETED", "CANCELLED", "PENDING", "KYC未通過"])
     with c3:
-        m_date, x_date = df["日期"].min(), df["日期"].max()
+        valid_dates = df["日期"].dropna()
+        m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
+        x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
 
+    # 資料過濾邏輯
     mask = pd.Series([True] * len(df))
     if sel_tanker != "全部": mask &= (df["油輪"] == sel_tanker)
     if sel_status != "全部": mask &= (df["狀態"] == sel_status)
     if isinstance(sel_range, tuple) and len(sel_range) == 2:
-        mask &= (df["日期"] >= sel_range[0]) & (df["日期"] <= sel_range[1])
+        start_dt = pd.to_datetime(sel_range[0])
+        end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
+        mask &= (df["日期"] >= start_dt) & (df["日期"] <= end_dt)
 
-    display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False])
+    display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    st.info("💡 點擊下方表格行，即可在底部查看原始郵件全文。")
-    event = st.dataframe(
-        display_df.drop(columns=["原始內文"]), 
-        use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row",
-        column_config={"日期": st.column_config.DateColumn("日期", format="MM/DD"), "主旨": st.column_config.TextColumn("主旨", width="large")}
-    )
+    st.info("💡 點擊左側表格內的任意郵件（最多 2 筆，選第 3 筆會自動換掉最舊的一筆），即可在右側分割預覽完整內容，中間可拖曳調整寬度。")
 
-    indices = event.get("selection", {}).get("rows", [])
-    if indices:
-        sel = display_df.iloc[indices[0]]
-        st.markdown("---")
-        st.subheader(f"✉️ 原始郵件詳情")
-        st.markdown(f'<div class="email-body">{sel["原始內文"]}</div>', unsafe_allow_html=True)
-    
-    st.download_button(f"📊 下載 CSV ({len(display_df)} 筆)", display_df.to_csv(index=False).encode('utf-8-sig'), "report.csv", "text/csv")
+    # === 版面結構：完全沒選取 -> 用單一 container（清單滿版，無閃爍）
+    #     一旦有選取 -> 固定用「3 欄」結構，之後在 1 筆/2 筆之間切換都共用同一組 DOM，
+    #     不會再重新掛載，避免了選取數量變化時的整頁重排問題。
+    DF_KEY = "email_table"
+    if "sel_order" not in st.session_state:
+        st.session_state.sel_order = []
 
-if st.sidebar.button("🔄 立即刷新資料"):
-    st.cache_data.clear()
-    st.rerun()
+    _hint_rows = st.session_state.get(DF_KEY, {}).get("selection", {}).get("rows", [])
+    guess_has_selection = len(st.session_state.sel_order) > 0 or len(_hint_rows) > 0
+
+    if not guess_has_selection:
+        marker_id = None
+        col_list = st.container()
+        preview_cols = []
+    else:
+        marker_id = "split-marker"
+        st.markdown(f'<div id="{marker_id}"></div>', unsafe_allow_html=True)
+        col_list, col_preview1, col_preview2 = st.columns([1, 1, 1], gap="small")
+        preview_cols = [col_preview1, col_preview2]
+
+    with col_list:
+        event = st.dataframe(
+            display_df.drop(columns=["原始內文"]), 
+            use_container_width=True, 
+            hide_index=True, 
+            on_select="rerun", 
+            selection_mode="multi-row",
+            key=DF_KEY,
+            height=500,
+            column_config={
+                "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"), 
+                "主旨": st.column_config.TextColumn("主旨", width="medium")
+            }
+        )
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            f"📊 匯出當前表格 ({len(display_df)} 筆)", 
+            display_df.to_csv(index=False).encode('utf-8-sig'), 
+            "ship_report.csv", 
+            "text/csv"
+        )
+
+    # === 用這一輪「真正最新」的選取結果，計算最終順序 (FIFO，最多 2 筆) ===
+    raw_rows = event.get("selection", {}).get("rows", [])
+    raw_set = set(raw_rows)
+    order = [r for r in st.session_state.sel_order if r in raw_set]
+    for r in raw_rows:
+        if r not in order:
+            order.append(r)  # 新選取的接到最後面，代表最新選取
+
+    trimmed = len(order) > 2
+    if trimmed:
+        order = order[-2:]  # 只保留最後選的 2 筆
+        if DF_KEY in st.session_state and "selection" in st.session_state[DF_KEY]:
+            st.session_state[DF_KEY]["selection"]["rows"] = order
+
+    st.session_state.sel_order = order
+    n_selected = len(order)
+
+    if marker_id:
+        # 這個分支下 1 筆/2 筆共用同一組 3 欄結構，用 JS 直接套用寬度即可，不需要重跑
+        apply_split_layout(marker_id, n_selected)
+
+    def render_email_pane(container, row):
+        time_str = row['日期'].strftime('%Y-%m-%d %H:%M') if pd.notnull(row['日期']) else '未知時間'
+        with container:
+            st.markdown(f'''
+            <div class="email-pane">
+                <div class="email-header">
+                    <div class="email-subject">{row['主旨']}</div>
+                    <div class="email-meta">
+                        🚢 <b>{row['油輪']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['狀態']}
+                    </div>
+                </div>
+                <div class="email-body">{row["原始內文"]}</div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+    for i, row_idx in enumerate(order):
+        if i < len(preview_cols) and row_idx < len(display_df):
+            render_email_pane(preview_cols[i], display_df.iloc[row_idx])
+
+    # 只有在「完全沒選 <-> 有選取」這個結構性邊界猜錯時才需要重跑校正一次；
+    # 在「選 1 筆 <-> 選 2 筆」之間切換完全不會走到這裡。
+    if trimmed:
+        st.rerun()
+    elif (n_selected == 0) != (not guess_has_selection):
+        st.rerun()
