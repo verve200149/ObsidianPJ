@@ -25,7 +25,7 @@ st.markdown("""
         border-radius: 8px; 
         border: 1px solid #e0e0e0;
         box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-        height: 500px;
+        height: 1000px;
         box-sizing: border-box;
         overflow-y: auto;
     }
@@ -379,7 +379,7 @@ if not df.empty:
             on_select="rerun", 
             selection_mode="multi-row",
             key=DF_KEY,
-            height=500,
+            height=1000,
             column_config={
                 "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"), 
                 "主旨": st.column_config.TextColumn("主旨", width="medium")
