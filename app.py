@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import os, yaml, json, re, subprocess
+import os, yaml, json, re
 from datetime import datetime
 
 # 建議將網頁預設為寬螢幕佈局
@@ -25,7 +25,7 @@ st.markdown("""
         border-radius: 8px; 
         border: 1px solid #e0e0e0;
         box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-        height: 1000px;
+        height: 500px;
         box-sizing: border-box;
         overflow-y: auto;
     }
@@ -105,10 +105,12 @@ def parse_ship_entries(target):
 def load_all_data():
     rows = []
     parse_errors = []
+    # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
+    EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk('.'):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
         for file in files:
-            if not (file.endswith('.md') and file != 'checklist.md'):
+            if not (file.endswith('.md') and file not in EXCLUDE_FILES):
                 continue
             fpath = os.path.join(root, file)
             try:
@@ -154,24 +156,7 @@ def load_all_data():
                 continue
     return pd.DataFrame(rows), parse_errors
 
-# --- 4. Git 拉取最新資料 ---
-def git_pull_latest():
-    """嘗試從 GitHub 拉取最新的資料檔案。回傳 (成功與否, 訊息)"""
-    if not os.path.exists('.git'):
-        return None, "目前目錄不是 Git repo，略過 git pull。"
-    try:
-        result = subprocess.run(
-            ['git', 'pull'],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            return True, result.stdout.strip() or "已是最新版本。"
-        else:
-            return False, result.stderr.strip() or "git pull 失敗。"
-    except Exception as e:
-        return False, f"執行 git pull 發生錯誤：{e}"
-
-# --- 5. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示，
+# --- 4. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示，
 #         避免每次選取都造成整頁重新排版、瞬間跳動的問題) ---
 def apply_split_layout(marker_id: str, n_selected: int):
     js = f"""
@@ -276,18 +261,6 @@ def apply_split_layout(marker_id: str, n_selected: int):
 # --- 介面渲染 ---
 st.title("🚢 船隊實時調度報表")
 
-# 側邊欄：刷新按鈕
-if st.sidebar.button("🔄 立即刷新資料庫"):
-    ok, msg = git_pull_latest()
-    if ok is None:
-        st.sidebar.info(msg)
-    elif ok:
-        st.sidebar.success(f"✅ Git pull 完成：{msg}")
-    else:
-        st.sidebar.error(f"❌ Git pull 失敗：{msg}")
-    st.cache_data.clear()
-    st.rerun()
-
 # 載入資料庫
 df, parse_errors = load_all_data()
 
@@ -379,7 +352,7 @@ if not df.empty:
             on_select="rerun", 
             selection_mode="multi-row",
             key=DF_KEY,
-            height=1000,
+            height=500,
             column_config={
                 "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"), 
                 "主旨": st.column_config.TextColumn("主旨", width="medium")
