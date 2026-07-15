@@ -186,9 +186,12 @@ def apply_split_layout(marker_id: str, n_selected: int):
         }}
 
         function setupHandle(doc, hBlock, id, left, right) {{
-            let h = hBlock.querySelector('#' + id);
-            if (h) return h;
-            h = doc.createElement('div');
+            // 每次都重新建立，不沿用舊的節點：
+            // components.html 每次執行都是全新的 iframe realm，若沿用舊節點，
+            // 其監聽器可能綁在已經失效的舊 realm 上，導致「看起來還在但拖不動」。
+            const old = hBlock.querySelector('#' + id);
+            if (old) old.remove();
+            const h = doc.createElement('div');
             h.id = id;
             h.style.cssText = 'flex:0 0 8px;width:8px;cursor:col-resize;position:relative;z-index:999;display:flex;align-items:center;justify-content:center;';
             h.innerHTML = '<div style="width:2px;height:32px;background:#4a4a4a;border-radius:2px;pointer-events:none;"></div>';
@@ -339,17 +342,24 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    st.info("💡 點擊左側表格內的任意郵件（最多 2 筆，選第 3 筆會自動換掉最舊的一筆），即可在右側分割預覽完整內容，中間可拖曳調整寬度。")
+    st.info("💡 點擊左側表格內的任意郵件（最多顯示 2 筆預覽），即可在右側分割預覽完整內容，中間可拖曳調整寬度。")
 
     # === 版面結構：完全沒選取 -> 用單一 container（清單滿版，無閃爍）
     #     一旦有選取 -> 固定用「3 欄」結構，之後在 1 筆/2 筆之間切換都共用同一組 DOM，
     #     不會再重新掛載，避免了選取數量變化時的整頁重排問題。
     DF_KEY = "email_table"
-    if "sel_order" not in st.session_state:
-        st.session_state.sel_order = []
+
+    # 用「序號」記錄每一筆被勾選的先後順序 (row_idx -> 序號)。
+    # 注意：新版 Streamlit 的 st.session_state[DF_KEY]["selection"] 是唯讀的，
+    # 沒辦法用程式強制取消使用者勾選的 checkbox，所以這裡只用序號來決定
+    # 「預覽區要顯示哪 2 筆」，checkbox 本身的勾選狀態完全交給使用者自行控制。
+    if "sel_seq" not in st.session_state:
+        st.session_state.sel_seq = {}   # {row_idx: 序號}
+    if "sel_counter" not in st.session_state:
+        st.session_state.sel_counter = 0
 
     _hint_rows = st.session_state.get(DF_KEY, {}).get("selection", {}).get("rows", [])
-    guess_has_selection = len(st.session_state.sel_order) > 0 or len(_hint_rows) > 0
+    guess_has_selection = len(st.session_state.sel_seq) > 0 or len(_hint_rows) > 0
 
     if not guess_has_selection:
         marker_id = None
@@ -384,22 +394,30 @@ if not df.empty:
             "text/csv"
         )
 
-    # === 用這一輪「真正最新」的選取結果，計算最終順序 (FIFO，最多 2 筆) ===
+    # === 用這一輪「真正最新」的選取結果，更新序號並算出要預覽的 2 筆 ===
     raw_rows = event.get("selection", {}).get("rows", [])
     raw_set = set(raw_rows)
-    order = [r for r in st.session_state.sel_order if r in raw_set]
+
+    # 已取消勾選的，移除其序號
+    for r in list(st.session_state.sel_seq.keys()):
+        if r not in raw_set:
+            del st.session_state.sel_seq[r]
+
+    # 新勾選的，給一個新序號 (代表最新選取)
     for r in raw_rows:
-        if r not in order:
-            order.append(r)  # 新選取的接到最後面，代表最新選取
+        if r not in st.session_state.sel_seq:
+            st.session_state.sel_counter += 1
+            st.session_state.sel_seq[r] = st.session_state.sel_counter
 
-    trimmed = len(order) > 2
-    if trimmed:
-        order = order[-2:]  # 只保留最後選的 2 筆
-        if DF_KEY in st.session_state and "selection" in st.session_state[DF_KEY]:
-            st.session_state[DF_KEY]["selection"]["rows"] = order
+    all_checked = sorted(st.session_state.sel_seq.keys(), key=lambda r: st.session_state.sel_seq[r])
+    preview_order = all_checked[-2:] if len(all_checked) > 2 else all_checked
+    n_selected = len(preview_order)
 
-    st.session_state.sel_order = order
-    n_selected = len(order)
+    if len(all_checked) > 2:
+        st.warning(
+            f"⚠️ 目前勾選了 {len(all_checked)} 筆，僅預覽最後選取的 2 筆。"
+            "若要讓表格勾選狀態也只剩 2 筆，請手動取消較舊的勾選。"
+        )
 
     if marker_id:
         # 這個分支下 1 筆/2 筆共用同一組 3 欄結構，用 JS 直接套用寬度即可，不需要重跑
@@ -420,13 +438,11 @@ if not df.empty:
             </div>
             ''', unsafe_allow_html=True)
 
-    for i, row_idx in enumerate(order):
+    for i, row_idx in enumerate(preview_order):
         if i < len(preview_cols) and row_idx < len(display_df):
             render_email_pane(preview_cols[i], display_df.iloc[row_idx])
 
     # 只有在「完全沒選 <-> 有選取」這個結構性邊界猜錯時才需要重跑校正一次；
     # 在「選 1 筆 <-> 選 2 筆」之間切換完全不會走到這裡。
-    if trimmed:
-        st.rerun()
-    elif (n_selected == 0) != (not guess_has_selection):
+    if (n_selected == 0) != (not guess_has_selection):
         st.rerun()
