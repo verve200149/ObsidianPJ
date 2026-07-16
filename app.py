@@ -259,7 +259,23 @@ def apply_split_layout(marker_id: str, n_selected: int):
     components.html(js, height=0, width=0)
 
 # --- 介面渲染 ---
-st.title("🚢 船隊實時調度報表")
+st.markdown("""
+    <style>
+    /* 精簡標題：預設一行，手機窄螢幕時再縮小字體/留白，避免佔用過多版面 */
+    .compact-title {
+        font-size: 1.8rem;
+        font-weight: 700;
+        margin: 0 0 0.4rem 0;
+        line-height: 1.2;
+        white-space: nowrap;
+    }
+    @media (max-width: 640px) {
+        .compact-title { font-size: 1.25rem; }
+        div[data-testid="stExpander"] summary { padding: 0.4rem 0.6rem; }
+    }
+    </style>
+    <div class="compact-title">🚢 船隊實時調度報表</div>
+    """, unsafe_allow_html=True)
 
 # 載入資料庫
 df, parse_errors = load_all_data()
@@ -270,7 +286,7 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
-# 數據看板 (Metrics)
+# 數據看板 (Metrics)：預設收合，手機上只佔一行標題，需要時再點開查看
 log = load_update_log()
 if log:
     update_time = log.get('update_time', '未知')
@@ -279,16 +295,15 @@ if log:
     latest_emails = log.get('latest_emails', 0)
     latest_imos = log.get('latest_imos', 0)
     latest_nodata = log.get('latest_nodata', 0)
-    
-    total_targets = latest_imos + latest_nodata
-    
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.metric("📁 總信件庫", f"{total_files} 封")
-    col_m2.metric(f"📅 最新 ({latest_date_str})", f"{latest_emails} 封")
-    col_m3.metric("🚢 最新解析油輪", f"{total_targets} 筆")
-    col_m4.metric("⏱️ 最後同步時間", update_time)
 
-st.divider()
+    total_targets = latest_imos + latest_nodata
+
+    with st.expander(f"📊 資料看板：總信件庫 {total_files} 封 ・ 最新 {latest_emails} 封 ・ 最後同步 {update_time}", expanded=False):
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("📁 總信件庫", f"{total_files} 封")
+        col_m2.metric(f"📅 最新 ({latest_date_str})", f"{latest_emails} 封")
+        col_m3.metric("🚢 最新解析油輪", f"{total_targets} 筆")
+        col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
     # 頂部篩選器
