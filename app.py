@@ -215,3 +215,5 @@ with col_preview:
                 <div class="email-body">{row["原始內文"]}</div>
             </div>
             ''', unsafe_allow_html=True)
+
+
