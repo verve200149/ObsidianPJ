@@ -191,6 +191,7 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 
 @st.cache_data(ttl=60)
 def load_all_data():
+    ship_map = load_ship_map()
     rows = []
     parse_errors = []
     # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
