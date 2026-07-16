@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import os, yaml, json, re
+import os, yaml, json, re, io
 from datetime import datetime
 
 # 建議將網頁預設為寬螢幕佈局
@@ -100,6 +100,47 @@ def parse_ship_entries(target):
         imo = re.search(r'IMO:(\d+)', seg)
         res.append({"fv": fv.group(1).strip() if fv else "-", "imo": imo.group(1).strip() if imo else "-"})
     return res
+
+@st.cache_data(ttl=60)
+def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
+    """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
+    每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
+    output = io.BytesIO()
+    export_df = full_df.drop(columns=["原始內文"], errors="ignore")
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        tankers = sorted([t for t in export_df["油輪"].unique() if t and t != "-"])
+        used_names = set()
+
+        for tanker in tankers:
+            sheet_df = export_df[export_df["油輪"] == tanker].sort_values(
+                by=["日期", "主旨"], ascending=[False, False]
+            )
+
+            # Excel 分頁名稱限制：最長 31 字元，且不能包含 \ / ? * [ ] :
+            safe_name = re.sub(r'[\\/*?:\[\]]', '_', str(tanker))[:31] or "sheet"
+            base_name, n = safe_name, 1
+            while safe_name in used_names:
+                suffix = f"_{n}"
+                safe_name = base_name[: 31 - len(suffix)] + suffix
+                n += 1
+            used_names.add(safe_name)
+
+            sheet_df.to_excel(writer, sheet_name=safe_name, index=False)
+
+            # 依內容自動調整欄寬，方便閱讀
+            ws = writer.sheets[safe_name]
+            for col_idx, col in enumerate(sheet_df.columns, start=1):
+                values = sheet_df[col].astype(str).tolist()
+                max_len = max([len(str(col))] + [len(v) for v in values]) if values else len(str(col))
+                ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
+            ws.freeze_panes = "A2"
+
+        if not tankers:
+            # 沒有任何資料時，至少寫一個空白分頁，避免 Excel 檔案無法開啟
+            pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
+
+    return output.getvalue()
 
 @st.cache_data(ttl=60)
 def load_all_data():
@@ -375,12 +416,21 @@ if not df.empty:
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
-        st.download_button(
-            f"📊 匯出當前表格 ({len(display_df)} 筆)", 
-            display_df.to_csv(index=False).encode('utf-8-sig'), 
-            "ship_report.csv", 
-            "text/csv"
-        )
+        exp_c1, exp_c2 = st.columns(2)
+        with exp_c1:
+            st.download_button(
+                f"📊 匯出目前篩選 ({len(display_df)} 筆)", 
+                display_df.to_csv(index=False).encode('utf-8-sig'), 
+                "ship_report.csv", 
+                "text/csv"
+            )
+        with exp_c2:
+            st.download_button(
+                f"🗂️ 匯出全部資料 (依油輪分頁，{df['油輪'].nunique()} 個分頁)",
+                build_tanker_excel(df),
+                "ship_report_by_tanker.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     # === 用這一輪「真正最新」的選取結果，更新序號並算出要預覽的 2 筆 ===
     raw_rows = event.get("selection", {}).get("rows", [])
