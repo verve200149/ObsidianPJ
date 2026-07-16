@@ -26,7 +26,7 @@ st.markdown("""
 
 
 # ==========================================
-# 2. 資料讀取與解析 (加入快取，避免每次點擊都重新掃描檔案)
+# 2. 資料讀取與解析 (加入快取與【數量限制測試】)
 # ==========================================
 def load_update_log():
     if os.path.exists('update_log.json'):
@@ -63,19 +63,26 @@ def parse_ship_entries(target):
         })
     return res
 
-# 【關鍵修正】：必須加上 @st.cache_data，否則點擊表格都會導致全站重讀，拖垮伺服器造成斷線
 @st.cache_data(ttl=120) 
 def load_all_data():
     ship_map = load_ship_map()
     rows = []
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     
+    file_count = 0  # 【測試】新增計數器
+    
     for root, _, files in os.walk('.'):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
         for file in files:
             if not (file.endswith('.md') and file not in EXCLUDE_FILES): continue
             
+            # 【測試】如果已經讀取超過 100 筆檔案，就直接中斷掃描
+            if file_count >= 100:
+                break
+                
             fpath = os.path.join(root, file)
+            file_count += 1  # 每嘗試讀取一個檔案，計數器 +1
+            
             try:
                 with open(fpath, 'r', encoding='utf-8') as f:
                     raw_text = f.read()
@@ -107,25 +114,33 @@ def load_all_data():
                     })
             except:
                 continue
+                
+        # 【測試】外層資料夾迴圈也需要跟著中斷
+        if file_count >= 100:
+            break
+            
     return pd.DataFrame(rows)
 
 
 # ==========================================
 # 3. 網頁 UI 渲染 (原生 Streamlit 佈局)
 # ==========================================
-st.title("🚢 船隊實時調度報表")
+st.title("🚢 船隊實時調度報表 (安全測試版)")
 
 # 重新整理按鈕 (清除快取)
 if st.button("🔄 重新載入最新資料 (清除快取)"):
     load_all_data.clear()
     st.rerun()
 
-# 載入資料 (這現在是非常快速的，因為有快取)
+# 載入資料 (現在有數量限制，不怕撐爆記憶體)
 df = load_all_data()
 
 if df.empty:
     st.warning("⚠️ 找不到任何資料。請確認 Markdown 檔案是否存在。")
     st.stop()
+
+# 顯示警告訊息，提醒目前是限制讀取數量的測試狀態
+st.warning(f"⚠️ **目前為記憶體壓力測試模式**：最多只會讀取 100 筆檔案。實際成功解析的資料為 **{len(df)} 筆**。")
 
 # --- 頂部篩選器 ---
 c1, c2, c3 = st.columns([1, 1, 1.5])
@@ -153,7 +168,6 @@ display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, Fal
 
 
 # --- 核心：原生表格與預覽分欄 ---
-# 【關鍵修正】：移除 JS 注入，直接使用穩定的原生 st.columns
 col_table, col_preview = st.columns([1.2, 1]) 
 
 with col_table:
