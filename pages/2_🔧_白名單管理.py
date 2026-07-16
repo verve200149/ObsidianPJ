@@ -34,7 +34,7 @@ if not os.path.exists(JSON_PATH) and os.path.exists("Kingdee_Export_UTF8.json"):
 def load_json_data():
     if os.path.exists(JSON_PATH):
         try:
-            with open(JSON_PATH, "r", encoding="utf-8") as f:
+            with open(JSON_PATH, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             
             # 處理 Kingdee 可能輸出的巢狀結構
