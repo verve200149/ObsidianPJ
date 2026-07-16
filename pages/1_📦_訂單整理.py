@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import os, yaml, re, io, json
 from datetime import datetime
-
 st.set_page_config(layout="wide", page_title="訂單整理", page_icon="📦")
 
 st.markdown("""
@@ -42,14 +41,56 @@ st.markdown("""
 
 @st.cache_data(ttl=300)
 def load_whitelist_imos():
-    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳有效 IMO 的 Set"""
+    """讀取 Kingdee 輸出的 JSON 作為白名單比對，解決跨目錄路徑、BOM 與數值轉型問題"""
+    # 1. 定義多種可能的路徑，確保不管在 Root 還是 pages/ 都能找到
+    possible_paths = [
+        "Kingdee_Export_UTF8.json",
+        "../Kingdee_Export_UTF8.json",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "Kingdee_Export_UTF8.json")
+    ]
+    
+    file_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            file_path = p
+            break
+            
+    if not file_path:
+        st.sidebar.error("⚠️ 找不到 Kingdee_Export_UTF8.json 白名單檔案！")
+        return set()
+
     try:
-        if os.path.exists("Kingdee_Export_UTF8.json"):
-            df_json = pd.read_json("Kingdee_Export_UTF8.json")
-            if "IMO" in df_json.columns:
-                return set(df_json["IMO"].astype(str).str.strip())
+        # 2. 改用 Python 原生的 json 庫，並使用 utf-8-sig 解決 BOM 報錯
+        with open(file_path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        
+        # 處理巢狀結構
+        if isinstance(data, dict):
+            for key, val in data.items():
+                if isinstance(val, list):
+                    data = val
+                    break
+        
+        # 3. 提取所有 IMO
+        if isinstance(data, list):
+            valid_imos = set()
+            for item in data:
+                if isinstance(item, dict) and "IMO" in item:
+                    imo_str = str(item["IMO"]).strip()
+                    if imo_str.endswith(".0"):
+                        imo_str = imo_str[:-2]
+                    if imo_str:
+                        valid_imos.add(imo_str)
+            
+            # 成功時在左側邊欄顯示綠色提示與抓取到的數量
+            st.sidebar.success(f"✅ KYC 白名單載入成功 (共 {len(valid_imos)} 筆 IMO)")
+            return valid_imos
+        else:
+            st.sidebar.error("⚠️ JSON 結構不符合預期 (無法找到 List)")
+            
     except Exception as e:
-        st.sidebar.warning(f"⚠️ 無法讀取 Kingdee_Export_UTF8.json: {e}")
+        st.sidebar.error(f"⚠️ 解析 JSON 失敗: {e}")
+        
     return set()
 
 
