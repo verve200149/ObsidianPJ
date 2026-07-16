@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import os, yaml, re, io
+import os, yaml, re, io, json
 from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="訂單整理", page_icon="📦")
@@ -40,11 +40,21 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
+@st.cache_data(ttl=300)
+def load_whitelist_imos():
+    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳有效 IMO 的 Set"""
+    try:
+        if os.path.exists("Kingdee_Export_UTF8.json"):
+            df_json = pd.read_json("Kingdee_Export_UTF8.json")
+            if "IMO" in df_json.columns:
+                return set(df_json["IMO"].astype(str).str.strip())
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ 無法讀取 Kingdee_Export_UTF8.json: {e}")
+    return set()
+
+
 def parse_metadata_robust(header_text: str) -> dict:
-    """
-    雙軌解析機制：優先使用標準 yaml 解析。
-    若失敗，則使用正則表達式強制提取。
-    """
+    """雙軌解析機制：優先使用標準 yaml 解析，失敗則轉為正則提取"""
     try:
         data = yaml.safe_load(header_text)
         if isinstance(data, dict) and data:
@@ -67,10 +77,13 @@ def parse_metadata_robust(header_text: str) -> dict:
 
 @st.cache_data(ttl=60)
 def load_cn_data():
-    """讀取 data_CN/ 底下的 .md 檔案，支援標準與非標準 YAML。"""
+    """讀取 data_CN/ 底下的 .md 檔案，支援單一信件內包含多個 IMO 的拆解"""
     rows = []
     parse_errors = []
     base_dir = "data_CN"
+    
+    # 載入 Kingdee 白名單
+    valid_imos = load_whitelist_imos()
 
     if not os.path.isdir(base_dir):
         return pd.DataFrame(), parse_errors
@@ -100,7 +113,6 @@ def load_cn_data():
 
                 body = "---".join(parts[2:]).strip()
 
-                # 日期解析
                 date_val = fm.get("date")
                 parsed_date = pd.NaT
                 if date_val:
@@ -109,20 +121,37 @@ def load_cn_data():
                     except Exception:
                         pass
 
-                # 處理寄件者：擷取 @ 前方的字元，並去除殘留的 '<' (例如 Gakii <gakii 會變成 Gakii gakii)
                 sender_val = str(fm.get("sender", "-") or "-")
                 sender_clean = sender_val.split("@")[0].replace("<", "").strip() if "@" in sender_val else sender_val
 
-                rows.append({
-                    "日期": parsed_date,
-                    "寄件者": sender_clean,
-                    "主旨": fm.get("subject", "-") or "-",
-                    "數量": fm.get("quantity", "-") or "-",
-                    "聯繫方式": fm.get("contact", "-") or "-",
-                    "放行狀態": fm.get("release_status", "-") or "-",
-                    "狀態": fm.get("status", "-") or "-", 
-                    "原始內文": body,
-                })
+                # IMO 擷取邏輯：使用 re.findall 抓取所有符合的 IMO 號碼
+                contact_val = str(fm.get("contact", "-") or "-")
+                imo_matches = re.findall(r"IMO.*?(\d{7})", contact_val, re.IGNORECASE)
+
+                # 如果都沒抓到 IMO，給一個空字串讓這封信還是能建立一筆資料
+                if not imo_matches:
+                    imo_matches = [""]
+
+                # 迴圈處理：有幾個 IMO，就建立幾筆獨立的資料列 (Row)
+                for imo_num in imo_matches:
+                    if not imo_num:
+                        alert_status = "無IMO"
+                    elif imo_num in valid_imos:
+                        alert_status = ""  # 吻合白名單，留空
+                    else:
+                        alert_status = "KYC"
+
+                    rows.append({
+                        "日期": parsed_date,
+                        "寄件者": sender_clean,
+                        "主旨": fm.get("subject", "-") or "-",
+                        "數量": fm.get("quantity", "-") or "-",
+                        "IMO": imo_num,
+                        "聯繫方式": contact_val,
+                        "放行狀態": fm.get("release_status", "-") or "-",
+                        "警示": alert_status, 
+                        "原始內文": body,
+                    })
             except Exception as e:
                 parse_errors.append((fpath, f"{type(e).__name__}: {e}"))
                 continue
@@ -132,12 +161,9 @@ def load_cn_data():
 
 @st.cache_data(ttl=60)
 def build_cn_excel(export_df: pd.DataFrame) -> bytes:
-    """依目前篩選範圍匯出成一份 Excel。"""
     output = io.BytesIO()
-    # 使用 copy() 避免 SettingWithCopyWarning
     clean_df = export_df.drop(columns=["原始內文"], errors="ignore").copy()
 
-    # 在匯出 Excel 前，將日期欄位只保留日期 (省略時間)
     if "日期" in clean_df.columns:
         clean_df["日期"] = clean_df["日期"].dt.date
 
@@ -153,6 +179,12 @@ def build_cn_excel(export_df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def style_alerts(val):
+    if val == "KYC":
+        return "background-color: #A31D1D; color: white;" 
+    return ""
+
+
 df, parse_errors = load_cn_data()
 
 if parse_errors:
@@ -164,7 +196,6 @@ if parse_errors:
 if df.empty:
     st.info("目前 `data_CN/` 資料夾內沒有可解析的資料。")
 else:
-    # 篩選：只有日期範圍
     valid_dates = df["日期"].dropna()
     m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
     x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
@@ -178,14 +209,17 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
-    # 【修改點 1】：自定義欄位排序，將「放行狀態」排第一，「日期」排第二
-    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "狀態", "原始內文"]
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "IMO", "聯繫方式", "警示", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
     st.caption(f"共 {len(display_df)} 筆資料")
 
+    show_df = display_df.drop(columns=["原始內文"])
+    styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
+    styled_df = styler_method(style_alerts, subset=["警示"]) if styler_method else show_df
+
     event = st.dataframe(
-        display_df.drop(columns=["原始內文"]),
+        styled_df,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -195,13 +229,13 @@ else:
             "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
             "數量": st.column_config.TextColumn("數量", width="small"),
+            "IMO": st.column_config.TextColumn("IMO", width="small"),
             "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
-            "狀態": st.column_config.TextColumn("狀態", width="small"),
+            "警示": st.column_config.TextColumn("警示", width="small"),
         }
     )
 
-    # 點擊某一列時，在下方顯示完整內文
     sel_rows = event.get("selection", {}).get("rows", [])
     if sel_rows:
         row = display_df.iloc[sel_rows[0]]
@@ -210,7 +244,7 @@ else:
         <div class="email-pane">
             <div class="email-subject">{row['主旨']}</div>
             <div class="email-meta">
-                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚙️ {row['狀態']}
+                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ {row['警示']}
             </div>
             <div class="email-body">{row["原始內文"]}</div>
         </div>
