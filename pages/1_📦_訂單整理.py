@@ -209,7 +209,7 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
-    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "IMO", "聯繫方式", "警示", "原始內文"]
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "警示", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
     st.caption(f"共 {len(display_df)} 筆資料")
