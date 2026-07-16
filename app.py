@@ -67,61 +67,14 @@ def load_update_log():
 # --- 2. 讀取 Kingdee JSON ---
 @st.cache_data(ttl=600)
 def load_ship_map():
-    """讀取 Kingdee 輸出的 JSON，解決跨目錄路徑、防呆解析並提供側邊欄提示"""
-    # 1. 多重路徑尋找
-    possible_paths = [
-        "Kingdee_Export_UTF8.json",
-        "../Kingdee_Export_UTF8.json",
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "Kingdee_Export_UTF8.json") if '__file__' in globals() else ""
-    ]
-    
-    file_path = None
-    for p in possible_paths:
-        if p and os.path.exists(p):
-            file_path = p
-            break
-            
-    if not file_path:
-        st.sidebar.error("⚠️ 找不到 Kingdee_Export_UTF8.json 船舶對照表！")
-        return {}
-
-    try:
-        # 2. 讀取並略過 BOM
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            data = json.load(f)
-        
-        # 3. 處理巢狀結構 (預防 Kingdee 把資料包在 {"data": [...]} 裡面)
-        if isinstance(data, dict):
-            for key, val in data.items():
-                if isinstance(val, list):
-                    data = val
-                    break
-        
-        # 4. 建立對照字典，同時相容大小寫的 'imo' 與 'IMO'
-        if isinstance(data, list):
-            ship_map = {}
-            for item in data:
-                if isinstance(item, dict):
-                    # 抓取 imo 或 IMO 欄位
-                    imo_val = item.get("imo", item.get("IMO", ""))
-                    imo_str = str(imo_val).strip()
-                    
-                    # 預防數值被轉為浮點數字串 (如 "8030453.0")
-                    if imo_str.endswith(".0"):
-                        imo_str = imo_str[:-2]
-                        
-                    if imo_str and imo_str.upper() != "NAN":
-                        ship_map[imo_str] = item
-            
-            st.sidebar.success(f"✅ 船舶對照表載入成功 (共 {len(ship_map)} 筆)")
-            return ship_map
-        else:
-            st.sidebar.error("⚠️ JSON 結構不符合預期 (無法找到船舶 List)")
-            
-    except Exception as e:
-        st.sidebar.error(f"⚠️ 解析船舶 JSON 失敗: {e}")
-        
+    if os.path.exists('Kingdee_Export_UTF8.json'):
+        try:
+            with open('Kingdee_Export_UTF8.json', 'r', encoding='utf-8-sig') as f:
+                return {str(item.get('imo', '')).strip(): item for item in json.load(f)}
+        except: return {}
     return {}
+
+ship_map = load_ship_map()
 
 # --- 3. 解析工具 ---
 def clean_mail_field(raw):
@@ -191,7 +144,6 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 
 @st.cache_data(ttl=60)
 def load_all_data():
-    ship_map = load_ship_map()
     rows = []
     parse_errors = []
     # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
