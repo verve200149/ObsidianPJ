@@ -227,10 +227,10 @@ else:
         height=550,
         column_config={
             "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
-            "主旨": st.column_config.TextColumn("主旨", width="medium"),
+            "主旨": st.column_config.TextColumn("主旨", width="small"),
             "數量": st.column_config.TextColumn("數量", width="small"),
             "IMO": st.column_config.TextColumn("IMO", width="small"),
-            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
+            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="small"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
             "警示": st.column_config.TextColumn("警示", width="small"),
         }
@@ -251,9 +251,18 @@ else:
         ''', unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
-    st.download_button(
-        f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
-        build_cn_excel(display_df),
-        "cn_orders.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    exp_c1, exp_c2 = st.columns(2)
+    with exp_c1:
+        st.download_button(
+            f"📊 匯出 CSV ({len(display_df)} 筆)",
+            display_df.to_csv(index=False).encode("utf-8-sig"),
+            "cn_orders.csv",
+            "text/csv"
+        )
+    with exp_c2:
+        st.download_button(
+            f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
+            build_cn_excel(display_df),
+            "cn_orders.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
