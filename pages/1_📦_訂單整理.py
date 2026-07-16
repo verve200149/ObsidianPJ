@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os, yaml, re, io, json
 from datetime import datetime
+
 st.set_page_config(layout="wide", page_title="訂單整理", page_icon="📦")
 
 st.markdown("""
@@ -41,8 +42,7 @@ st.markdown("""
 
 @st.cache_data(ttl=300)
 def load_whitelist_imos():
-    """讀取 Kingdee 輸出的 JSON 作為白名單比對，解決跨目錄路徑、BOM 與數值轉型問題"""
-    # 1. 定義多種可能的路徑，確保不管在 Root 還是 pages/ 都能找到
+    """讀取 Kingdee 輸出的 JSON，使用 Pandas 強效解析並處理 BOM 與大小寫/空白差異"""
     possible_paths = [
         "Kingdee_Export_UTF8.json",
         "../Kingdee_Export_UTF8.json",
@@ -60,33 +60,26 @@ def load_whitelist_imos():
         return set()
 
     try:
-        # 2. 改用 Python 原生的 json 庫，並使用 utf-8-sig 解決 BOM 報錯
-        with open(file_path, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
+        # 1. 使用 pandas 讀取，並加上 utf-8-sig 破解 BOM 炸彈
+        df_json = pd.read_json(file_path, encoding="utf-8-sig")
         
-        # 處理巢狀結構
-        if isinstance(data, dict):
-            for key, val in data.items():
-                if isinstance(val, list):
-                    data = val
-                    break
+        # 2. 暴力清理欄位名稱：全轉大寫、去前後空白 (解決小寫 "imo" 的陷阱)
+        df_json.columns = df_json.columns.astype(str).str.strip().str.upper()
         
-        # 3. 提取所有 IMO
-        if isinstance(data, list):
-            valid_imos = set()
-            for item in data:
-                if isinstance(item, dict) and "IMO" in item:
-                    imo_str = str(item["IMO"]).strip()
-                    if imo_str.endswith(".0"):
-                        imo_str = imo_str[:-2]
-                    if imo_str:
-                        valid_imos.add(imo_str)
+        if "IMO" in df_json.columns:
+            # 3. 處理數值：清除空值 -> 轉字串 -> 去除浮點數結尾的 .0 -> 去前後空白
+            valid_imos = set(
+                df_json["IMO"].dropna().astype(str)
+                .str.replace(r'\.0$', '', regex=True)
+                .str.strip()
+            )
+            # 排除空字串與 NaN
+            valid_imos = {imo for imo in valid_imos if imo and imo.upper() != "NAN"}
             
-            # 成功時在左側邊欄顯示綠色提示與抓取到的數量
             st.sidebar.success(f"✅ KYC 白名單載入成功 (共 {len(valid_imos)} 筆 IMO)")
             return valid_imos
         else:
-            st.sidebar.error("⚠️ JSON 結構不符合預期 (無法找到 List)")
+            st.sidebar.error(f"⚠️ 找不到 IMO 欄位！現有欄位: {list(df_json.columns)}")
             
     except Exception as e:
         st.sidebar.error(f"⚠️ 解析 JSON 失敗: {e}")
@@ -278,7 +271,7 @@ else:
         selection_mode="single-row",
         height=550,
         column_config={
-            "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"),
+            "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
             "數量": st.column_config.TextColumn("數量", width="small"),
             "IMO": st.column_config.TextColumn("IMO", width="small"),
