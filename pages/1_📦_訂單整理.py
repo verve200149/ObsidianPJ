@@ -121,8 +121,18 @@ def load_cn_data():
                     except Exception:
                         pass
 
-                sender_val = str(fm.get("sender", "-") or "-")
-                sender_clean = sender_val.split("@")[0].replace("<", "").strip() if "@" in sender_val else sender_val
+                # 處理寄件者：若有稱號則只留稱號，若為純信箱則取 @ 之前的部分
+                sender_val = str(fm.get("sender", "-") or "-").strip()
+                if len(sender_val.split()) == 1 and "@" in sender_val:
+                    sender_clean = sender_val.split("@")[0].replace("<", "").replace(">", "")
+                elif "@" in sender_val:
+                    name_parts = [p for p in sender_val.split() if "@" not in p]
+                    if name_parts:
+                        sender_clean = " ".join(name_parts).replace('"', '').replace("'", "")
+                    else:
+                        sender_clean = sender_val.split("@")[0].replace("<", "").strip()
+                else:
+                    sender_clean = sender_val
 
                 # IMO 擷取邏輯：使用 re.findall 抓取所有符合的 IMO 號碼
                 contact_val = str(fm.get("contact", "-") or "-")
@@ -227,11 +237,11 @@ else:
         selection_mode="single-row",
         height=550,
         column_config={
-            "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
-            "主旨": st.column_config.TextColumn("主旨", width="small"),
+            "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"),
+            "主旨": st.column_config.TextColumn("主旨", width="medium"),
             "數量": st.column_config.TextColumn("數量", width="small"),
             "IMO": st.column_config.TextColumn("IMO", width="small"),
-            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="small"),
+            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
             "警示": st.column_config.TextColumn("警示", width="small"),
         }
