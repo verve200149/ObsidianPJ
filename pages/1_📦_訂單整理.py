@@ -40,9 +40,34 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
+def parse_metadata_robust(header_text: str) -> dict:
+    """
+    雙軌解析機制：優先使用標準 yaml 解析。
+    若失敗，則使用正則表達式強制提取。
+    """
+    try:
+        data = yaml.safe_load(header_text)
+        if isinstance(data, dict) and data:
+            return data
+    except Exception:
+        pass
+
+    data = {}
+    fields = ["date", "sender", "subject", "quantity", "contact", "release_status", "status"]
+    for field in fields:
+        pattern = rf"{field}:\s*\"?(.*?)\"?(?=\s*(?:{'|'.join(fields)}):|$)"
+        match = re.search(pattern, header_text, re.DOTALL)
+        if match:
+            val = match.group(1).strip()
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            data[field] = val
+    return data
+
+
 @st.cache_data(ttl=60)
 def load_cn_data():
-    """讀取 data_CN/ 底下的 .md 檔案 (CNORDER 信箱格式：數量/聯繫方式/放行狀態)。"""
+    """讀取 data_CN/ 底下的 .md 檔案，支援標準與非標準 YAML。"""
     rows = []
     parse_errors = []
     base_dir = "data_CN"
@@ -68,21 +93,34 @@ def load_cn_data():
                     parse_errors.append((fpath, "YAML frontmatter 格式不完整 (--- 數量不足)"))
                     continue
 
-                fm = yaml.safe_load(parts[1])
+                fm = parse_metadata_robust(parts[1])
                 if not fm:
-                    parse_errors.append((fpath, "YAML 解析結果為空"))
+                    parse_errors.append((fpath, "YAML 區塊解析結果為空"))
                     continue
 
-                # 內文可能自己就含有 '---'，用 join 把後面全部接回來避免被截斷
                 body = "---".join(parts[2:]).strip()
 
+                # 日期解析
+                date_val = fm.get("date")
+                parsed_date = pd.NaT
+                if date_val:
+                    try:
+                        parsed_date = pd.to_datetime(date_val)
+                    except Exception:
+                        pass
+
+                # 處理寄件者：擷取 @ 前方的字元，並去除殘留的 '<' (例如 Gakii <gakii 會變成 Gakii gakii)
+                sender_val = str(fm.get("sender", "-") or "-")
+                sender_clean = sender_val.split("@")[0].replace("<", "").strip() if "@" in sender_val else sender_val
+
                 rows.append({
-                    "日期": pd.to_datetime(fm.get("date")) if fm.get("date") else pd.NaT,
-                    "寄件者": fm.get("sender", "-") or "-",
+                    "日期": parsed_date,
+                    "寄件者": sender_clean,
                     "主旨": fm.get("subject", "-") or "-",
                     "數量": fm.get("quantity", "-") or "-",
                     "聯繫方式": fm.get("contact", "-") or "-",
                     "放行狀態": fm.get("release_status", "-") or "-",
+                    "狀態": fm.get("status", "-") or "-", 
                     "原始內文": body,
                 })
             except Exception as e:
@@ -96,7 +134,12 @@ def load_cn_data():
 def build_cn_excel(export_df: pd.DataFrame) -> bytes:
     """依目前篩選範圍匯出成一份 Excel。"""
     output = io.BytesIO()
-    clean_df = export_df.drop(columns=["原始內文"], errors="ignore")
+    # 使用 copy() 避免 SettingWithCopyWarning
+    clean_df = export_df.drop(columns=["原始內文"], errors="ignore").copy()
+
+    # 在匯出 Excel 前，將日期欄位只保留日期 (省略時間)
+    if "日期" in clean_df.columns:
+        clean_df["日期"] = clean_df["日期"].dt.date
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         clean_df.to_excel(writer, sheet_name="訂單整理", index=False)
@@ -135,6 +178,10 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
+    # 【修改點 1】：自定義欄位排序，將「放行狀態」排第一，「日期」排第二
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "狀態", "原始內文"]
+    display_df = display_df[[c for c in col_order if c in display_df.columns]]
+
     st.caption(f"共 {len(display_df)} 筆資料")
 
     event = st.dataframe(
@@ -145,9 +192,12 @@ else:
         selection_mode="single-row",
         height=550,
         column_config={
-            "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"),
+            "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
+            "數量": st.column_config.TextColumn("數量", width="small"),
             "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
+            "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
+            "狀態": st.column_config.TextColumn("狀態", width="small"),
         }
     )
 
@@ -160,7 +210,7 @@ else:
         <div class="email-pane">
             <div class="email-subject">{row['主旨']}</div>
             <div class="email-meta">
-                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']}
+                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚙️ {row['狀態']}
             </div>
             <div class="email-body">{row["原始內文"]}</div>
         </div>
