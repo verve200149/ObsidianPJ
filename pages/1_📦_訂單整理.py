@@ -209,6 +209,7 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
+    # 調整欄位順序：聯繫方式 在 IMO 前面
     col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "警示", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
@@ -250,19 +251,11 @@ else:
         </div>
         ''', unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
-    exp_c1, exp_c2 = st.columns(2)
-    with exp_c1:
-        st.download_button(
-            f"📊 匯出 CSV ({len(display_df)} 筆)",
-            display_df.to_csv(index=False).encode("utf-8-sig"),
-            "cn_orders.csv",
-            "text/csv"
-        )
-    with exp_c2:
-        st.download_button(
-            f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
-            build_cn_excel(display_df),
-            "cn_orders.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    # 移除原本的 st.columns，直接放置獨立的 Excel 下載按鈕
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.download_button(
+        f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
+        build_cn_excel(display_df),
+        "cn_orders.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
