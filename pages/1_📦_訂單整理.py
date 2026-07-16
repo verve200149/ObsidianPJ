@@ -250,19 +250,10 @@ else:
         </div>
         ''', unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    exp_c1, exp_c2 = st.columns(2)
-    with exp_c1:
-        st.download_button(
-            f"📊 匯出 CSV ({len(display_df)} 筆)",
-            display_df.to_csv(index=False).encode("utf-8-sig"),
-            "cn_orders.csv",
-            "text/csv"
-        )
-    with exp_c2:
-        st.download_button(
-            f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
-            build_cn_excel(display_df),
-            "cn_orders.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+st.markdown("<br>", unsafe_allow_html=True)
+    st.download_button(
+        f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
+        build_cn_excel(display_df),
+        "cn_orders.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
