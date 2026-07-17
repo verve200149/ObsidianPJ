@@ -484,7 +484,7 @@ if not df.empty:
 
         def style_duplicate_imo(s):
             # 針對被標記為有效配對的 IMO 欄位，套用橘色半透明背景 (50%) 與粗體
-            return ['background-color: rgba(253, 126, 20, 0.5); font-weight: bold;' if i in valid_dup_indices else '' for i in s.index]
+            return ['background-color: rgba(253, 126, 20, 0.6); font-weight: bold;' if i in valid_dup_indices else '' for i in s.index]
 
         # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
