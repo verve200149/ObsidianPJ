@@ -1,9 +1,11 @@
 [theme]
-# 調整全站基礎字體大小為小號，Streamlit 的 DataFrame 會自動跟著縮小字體！
-base = "dark" # 如果你是暗色主題，可用 dark；亮色用 light
+# 暗色主題
+base = "dark"
 font = "sans serif"
 
-# 強制將 Streamlit 的 UI 與表格字型縮小
-[ui]
-# 這裡能把全站元件的預設緊湊度拉到最高，讓畫面能容納更多資訊
-density = "compact"
+# 整個 App 的根字體大小（單位 px，預設 16）。
+# 這是目前唯一真的能改變 st.dataframe 表格文字大小的方式，
+# 但它是「整站通用」的設定：標題、按鈕、側邊欄文字也會一起縮放，
+# 沒辦法只單獨調整表格。改這個數字、重新部署後就會生效，
+# 不需要動到程式碼。
+baseFontSize = 12
