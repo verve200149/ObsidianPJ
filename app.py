@@ -7,18 +7,29 @@ from datetime import datetime
 # 建議將網頁預設為寬螢幕佈局
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
-# 自定義 CSS (打造清爽的郵箱風格 UI + 手機版篩選器強制同行優化 + 強制表格特定欄位字體縮小)
-st.markdown("""
+# ==========================================
+# 🎛️ 側邊欄控制器：介面設定
+# ==========================================
+with st.sidebar:
+    st.markdown("### ⚙️ 介面設定")
+    # 動態字體大小控制器 (預設 11px，範圍 8~20px)
+    table_font_size = st.slider("🔡 調整表格字體大小 (px)", min_value=8, max_value=20, value=11, step=1)
+    st.markdown("---")
+
+# ==========================================
+# 🎨 自定義 CSS (結合動態字體變數)
+# ==========================================
+st.markdown(f"""
     <style>
     /* 調整指標數字大小與顏色 (商務藍) */
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
+    div[data-testid="stMetricValue"] {{ font-size: 1.8rem; color: #1a73e8; font-weight: 600; }}
     
-    /* 隱則預設的 DataFrame index */
-    .row_heading.level0 {display:none}
-    .blank {display:none}
+    /* 隱藏預設的 DataFrame index */
+    .row_heading.level0 {{display:none}}
+    .blank {{display:none}}
     
     /* 右側郵件閱讀器的精美樣式 */
-    .email-pane { 
+    .email-pane {{ 
         background-color: #ffffff; 
         color: #333333; 
         padding: 25px; 
@@ -28,57 +39,57 @@ st.markdown("""
         height: 500px;
         box-sizing: border-box;
         overflow-y: auto;
-    }
-    .email-header {
+    }}
+    .email-header {{
         border-bottom: 1px solid #eeeeee;
         padding-bottom: 12px;
         margin-bottom: 20px;
-    }
-    .email-subject { 
+    }}
+    .email-subject {{ 
         font-size: 1.3em; 
         font-weight: bold; 
         color: #202124; 
         margin-bottom: 8px;
-    }
-    .email-meta {
+    }}
+    .email-meta {{
         font-size: 0.9em; 
         color: #5f6368; 
-    }
-    .email-body {
+    }}
+    .email-body {{
         white-space: pre-wrap; 
         font-family: 'Consolas', 'Courier New', monospace; 
         font-size: 14px;
         line-height: 1.6;
         color: #444444;
-    }
+    }}
 
-    /* 💥 【全新加強】強制讓 Streamlit 表格內部的特定單元格字體縮小且不加粗 */
+    /* 💥 強制套用側邊欄設定的字體大小到 DataFrame */
+    div[data-testid="stDataFrame"] *, 
     div[data-testid="stDataFrame"] table, 
-    div[data-testid="stDataFrame"] div {
-        font-size: 12px !important; /* 全局表格微縮 */
-    }
+    div[data-testid="stDataFrame"] div {{
+        font-size: {table_font_size}px !important;
+    }}
 
-    /* 手機版篩選器元件內縮與緊湊化，防止同行時內容爆出去 */
-    @media (max-width: 640px) {
-        div[id="mobile-filter-container"] label {
-            font-size: 0.75rem !important; /* 縮小上方標題如 「🚢 篩選油輪」 */
-        }
-        div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {
+    /* 手機版篩選器元件內縮與緊湊化 */
+    @media (max-width: 640px) {{
+        div[id="mobile-filter-container"] label {{
+            font-size: 0.75rem !important; 
+        }}
+        div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {{
             font-size: 0.75rem !important;
-        }
-        div[id="mobile-filter-container"] div[data-baseweb="select"] {
-            font-size: 0.75rem !important; /* 縮小下拉選單內文字 */
-        }
-        div[id="mobile-filter-container"] input {
-            font-size: 0.7rem !important;  /* 縮小日期輸入框文字 */
+        }}
+        div[id="mobile-filter-container"] div[data-baseweb="select"] {{
+            font-size: 0.75rem !important; 
+        }}
+        div[id="mobile-filter-container"] input {{
+            font-size: 0.7rem !important;  
             padding: 2px 4px !important;
-        }
-        /* 讓下拉選單與日期高度更緊湊 */
-        div[id="mobile-filter-container"] div[data-baseweb="base-input"] {
+        }}
+        div[id="mobile-filter-container"] div[data-baseweb="base-input"] {{
             min-height: 30px !important;
             height: 30px !important;
-        }
-    }
+        }}
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -106,8 +117,6 @@ ship_map = load_ship_map()
 
 # --- 3. 解析工具 ---
 def clean_mail_field(raw):
-    """把 Obsidian 常見的 Markdown 連結格式 [顯示文字](mailto:xxx) 還原成純文字，
-    避免直接 split('@') 時抓到帶有中括號的錯誤字串。"""
     if not raw:
         return ""
     raw = str(raw)
@@ -115,9 +124,6 @@ def clean_mail_field(raw):
     return raw.strip()
 
 def parse_ship_entries(target):
-    """解析 target 欄位。若本次沒有實際船隻資料 (本次無資料)，
-    仍回傳一筆佔位資料，讓這封信在前端能被分類、被看見，
-    而不是直接消失。"""
     if not target or str(target).strip() == "(本次無資料)":
         return [{"fv": "(本次無資料)", "imo": "-"}]
     segments = [s.strip() for s in str(target).split('|') if s.strip()]
@@ -131,8 +137,6 @@ def parse_ship_entries(target):
 
 @st.cache_data(ttl=60)
 def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
-    """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
-    每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
     output = io.BytesIO()
     export_df = full_df.drop(columns=["原始內文"], errors="ignore")
 
@@ -440,13 +444,9 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
-        # =========================================================
-        # 💡 【動態表格設定區】未來你要改標題或順序，只要在這裡改！
-        # =========================================================
-        # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-        # 2a. 狀態顏色邏輯 (只設定 30% 背景色，徹底拿掉 color 與 font-weight，交給原生系統與全局 CSS 控管)
+        # 2a. 狀態顏色邏輯 (只設定 30% 背景色)
         def style_status(val):
             val_upper = str(val).upper().strip()
             if "APPROVED" in val_upper: 
@@ -459,7 +459,7 @@ if not df.empty:
                 return "background-color: rgba(255, 243, 205, 0.3);"
             return ""
 
-        # 2b. 判斷並標示「有效配對」的 IMO 邏輯 (只設定 50% 背景色，徹底拿掉文字自定義，交給原生處理)
+        # 2b. 判斷並標示「有效配對」的 IMO 邏輯 (只設定 50% 背景色)
         valid_dup_indices = set()
         valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
         valid_df = display_df[valid_imo_mask]
@@ -483,7 +483,6 @@ if not df.empty:
         def style_duplicate_imo(s):
             return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
             
-        # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
         styled_df = styled_df.apply(style_duplicate_imo, subset=["IMO"])
         
@@ -496,13 +495,11 @@ if not df.empty:
             key=DF_KEY,
             height=500,
             column_config={
-                # 前端動態改名：把原名為 "日期" 的欄位，在畫面上顯示成 "收信時間"
                 "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
                 "狀態": st.column_config.TextColumn("狀態", width="small"),
                 "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
             }
         )
-        # =========================================================
         
         st.markdown("<br>", unsafe_allow_html=True)
         exp_c1, exp_c2 = st.columns(2)
