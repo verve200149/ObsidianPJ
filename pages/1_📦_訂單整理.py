@@ -8,7 +8,6 @@ st.set_page_config(layout="wide", page_title="訂單整理", page_icon="📦")
 # 初始化 Session State
 if "deleted_uids" not in st.session_state:
     st.session_state["deleted_uids"] = set()
-# 新增一個 counter 用來強制刷新表格的 key，解決唯讀錯誤
 if "df_key_counter" not in st.session_state:
     st.session_state["df_key_counter"] = 0
 
@@ -24,18 +23,31 @@ st.markdown("""
     @media (max-width: 640px) {
         .compact-title { font-size: 1.25rem; }
     }
+    
+    /* === 🚀 魔法區：強制懸浮刪除按鈕 === */
+    /* 我們將刪除按鈕設為 primary，並強制絕對定位到右上角 */
+    button[kind="primary"] {
+        position: absolute !important;
+        right: 15px !important;
+        top: 15px !important;
+        z-index: 999 !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.2) !important;
+    }
+
     .email-pane {
         background-color: #ffffff;
         color: #333333;
         padding: 20px;
         border-radius: 8px;
+        /* 向上推移，吃掉按鈕原本佔據的空白行距，讓畫面完美貼齊 */
+        margin-top: -45px; 
     }
     .email-subject { 
         font-size: 1.2em; 
         font-weight: bold; 
         color: #202124; 
         margin-bottom: 8px; 
-        /* 預留右邊距，避免長標題被浮動按鈕遮擋 */
+        /* 預留右邊距，避免長標題被右上角的浮動按鈕遮擋 */
         padding-right: 90px; 
     }
     .email-meta { font-size: 0.95em; color: #5f6368; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eaeaea; }
@@ -45,20 +57,6 @@ st.markdown("""
         font-size: 14px;
         line-height: 1.6;
         color: #444444;
-    }
-    
-    /* === 🚀 魔法區：利用錨點讓刪除按鈕懸浮 === */
-    /* 1. 隱藏用來當作定位錨點的隱形容器 */
-    div.element-container:has(#float-delete) {
-        display: none;
-    }
-    /* 2. 抓取錨點後方緊接著的元件 (即我們的刪除按鈕)，設為絕對定位 */
-    div.element-container:has(#float-delete) + div.element-container {
-        position: absolute;
-        right: 15px;
-        top: 15px;
-        width: auto;
-        z-index: 100;
     }
     </style>
     <div class="compact-title">📦 訂單整理</div>
@@ -307,17 +305,13 @@ else:
                 time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
                 callsign_display = f"<span style='color:#A31D1D; font-weight:bold;'>{row['呼號']}</span>" if row['呼號'] == 'KYC' else row['呼號']
                 
-                # 1. 插入 HTML 錨點（不會被顯示，純作 CSS 定位器）
-                st.markdown('<div id="float-delete"></div>', unsafe_allow_html=True)
-
-                # 2. 插入按鈕（會被剛剛寫在頂部的 CSS 抓取，變成絕對定位漂浮在右上角）
-                if st.button("🗑️ 刪除", help="暫時隱藏此筆訂單，匯出時亦會剔除"):
+                # ★ 將按鈕設定為 type="primary"，CSS 就會自動將它吸附到右上角！
+                if st.button("🗑️ 刪除", type="primary", help="暫時隱藏此筆訂單，匯出時亦會剔除"):
                     st.session_state["deleted_uids"].add(row["_uid"])
-                    # ★ 移除原本會導致報錯的程式碼，改用計數器刷新 Key 來重置選取狀態
                     st.session_state["df_key_counter"] += 1
                     st.rerun()
 
-                # 3. 滿版展開的郵件內容
+                # 滿版展開的郵件內容 (不用 st.columns 壓縮寬度)
                 st.markdown(f'''
                 <div class="email-pane">
                     <div class="email-subject">{row['主旨']}</div>
