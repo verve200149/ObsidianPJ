@@ -171,7 +171,7 @@ def load_all_data():
     DATA_DIR = 'data_John'
     # 如果資料夾還不存在，直接回傳空資料
     if not os.path.exists(DATA_DIR):
-        return pd.(rows), parse_errors
+        return pd.DataFrame(rows), parse_errors
     # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
