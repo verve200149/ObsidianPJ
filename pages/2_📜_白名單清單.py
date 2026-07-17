@@ -5,6 +5,7 @@ import os
 
 st.set_page_config(layout="wide", page_title="白名單清單", page_icon="📜")
 
+# CSS 樣式增強
 st.markdown("""
     <style>
     .compact-title {
@@ -29,22 +30,22 @@ st.markdown("""
         height: 42px;
     }
     
-    /* === 🚀 魔法區：放大表格右上角的原生工具列 === */
+    /* === 🚀 魔法區：放大表格右上角的原生工具列並置於頂層 === */
     [data-testid="stElementToolbar"] {
-        transform: scale(1.4);       /* 調整這個數值來控制放大倍率，1.4 = 放大 40% */
-        transform-origin: top right; /* 確保它錨定在右上角放大，不會跑版 */
-        opacity: 0.9 !important;     /* 提高透明度，讓圖示更清晰顯眼 */
+        transform: scale(1.4);       /* 調整放大倍率 */
+        transform-origin: top right; /* 錨定在右上角 */
+        opacity: 0.9 !important;     /* 提高透明度 */
+        z-index: 99999 !important;   /* 🌟 強制拉到最頂層圖層，避免被表格標題遮擋 */
     }
-    /* 如果你想讓滑鼠移過去時再稍微放大一點點，可以加上這段互動效果 */
+    /* Hover 互動效果 */
     [data-testid="stElementToolbar"]:hover {
         transform: scale(1.5);
         opacity: 1 !important;
+        z-index: 99999 !important;   /* 確保滑鼠懸停時一樣在最頂層 */
     }
     </style>
     <div class="compact-title">📜 白名單管理系統</div>
     """, unsafe_allow_html=True)
-
-FILE_PATH = "Kingdee_Export_UTF8.json"
 
 # ==========================================
 # 1. 載入資料 (Session State 管理)
