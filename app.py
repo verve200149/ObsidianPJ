@@ -13,7 +13,7 @@ st.markdown("""
     /* 調整指標數字大小與顏色 (商務藍) */
     div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
     
-    /* 隱藏預設的  index */
+    /* 隱藏預設的 DataFrame index */
     .row_heading.level0 {display:none}
     .blank {display:none}
     
@@ -124,7 +124,7 @@ def parse_ship_entries(target):
     return res
 
 @st.cache_data(ttl=60)
-def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
+def build_tanker_excel(full_df: pd.DataFrame) -> bytes:  # 💥 修正 SyntaxError
     """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
     每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
     output = io.BytesIO()
@@ -139,7 +139,6 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
                 by=["日期", "主旨"], ascending=[False, False]
             )
 
-            # Excel 分頁名稱限制：最長 31 字元，且不能包含 \ / ? * [ ] :
             safe_name = re.sub(r'[\\/*?:\[\]]', '_', str(tanker))[:31] or "sheet"
             base_name, n = safe_name, 1
             while safe_name in used_names:
@@ -150,7 +149,6 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 
             sheet_df.to_excel(writer, sheet_name=safe_name, index=False)
 
-            # 依內容自動調整欄寬，方便閱讀
             ws = writer.sheets[safe_name]
             for col_idx, col in enumerate(sheet_df.columns, start=1):
                 values = sheet_df[col].astype(str).tolist()
@@ -159,7 +157,7 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
             ws.freeze_panes = "A2"
 
         if not tankers:
-            # 沒有任何資料時，至少寫一個空白分頁，避免 Excel 檔案無法開啟
+            # 💥 修正 SyntaxError
             pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
 
     return output.getvalue()
@@ -169,10 +167,9 @@ def load_all_data():
     rows = []
     parse_errors = []
     DATA_DIR = 'data_John'
-    # 如果資料夾還不存在，直接回傳空資料
     if not os.path.exists(DATA_DIR):
-        return pd.DataFrame(rows), parse_errors
-    # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
+        return pd.DataFrame(rows), parse_errors # 💥 修正 SyntaxError
+        
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
@@ -198,17 +195,14 @@ def load_all_data():
                     parse_errors.append((fpath, "YAML 解析結果為空"))
                     continue
 
-                # 內文可能自己就含有 '---'（例如簽名分隔線），
-                # 用 join 把第 2 個 '---' 之後的內容全部接回來，避免內文被截斷。
                 body = '---'.join(parts[2:]).strip()
-
                 ships = parse_ship_entries(fm.get('target', ''))
                 for s in ships:
                     s_info = ship_map.get(s['imo'], {})
                     is_kyc_fail = (s['imo'] != "-" and s['imo'] not in ship_map)
                     rows.append({
                         "油輪": clean_mail_field(fm.get('ships', '')).split('@')[0] or '-',
-                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT,
+                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT, # 內部維持叫「日期」
                         "位置": fm.get('Position', '-') or '-',
                         "船名": s_info.get('name', s['fv']),
                         "狀態": "KYC未通過" if is_kyc_fail else str(fm.get('category', 'PENDING')).upper(),
@@ -221,9 +215,10 @@ def load_all_data():
             except Exception as e:
                 parse_errors.append((fpath, f"{type(e).__name__}: {e}"))
                 continue
-    return pd.(rows), parse_errors
+    # 💥 修正 SyntaxError
+    return pd.DataFrame(rows), parse_errors
 
-# --- 4. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示) ---
+# --- 4. 分割版面 (固定 3 欄結構) ---
 def apply_split_layout(marker_id: str, n_selected: int):
     js = f"""
     <script>
@@ -321,7 +316,7 @@ def apply_split_layout(marker_id: str, n_selected: int):
     """
     components.html(js, height=0, width=0)
 
-# --- 5. 強制手機版篩選器維持同一行不拆行 (全域定義) ---
+# --- 5. 強制手機版篩選器維持同一行不拆行 ---
 def apply_mobile_filter_layout():
     js = """
     <script>
@@ -336,22 +331,19 @@ def apply_mobile_filter_layout():
                 return;
             }
             
-            // 找到 Streamlit 原生的 Columns 橫向區塊
             const hBlock = container.querySelector('[data-testid="stHorizontalBlock"]');
             if (!hBlock) return;
             
-            // 1. 強制 Flex 佈局不換行
             hBlock.style.setProperty('display', 'flex', 'important');
             hBlock.style.setProperty('flex-direction', 'row', 'important');
             hBlock.style.setProperty('flex-wrap', 'nowrap', 'important');
             hBlock.style.setProperty('gap', '8px', 'important');
             
-            // 2. 強制子欄位等寬平分 (4:4:4)
             const cols = Array.from(hBlock.children).filter(c => c.getAttribute && c.getAttribute('data-testid') === 'stColumn');
             cols.forEach(col => {
                 col.style.setProperty('flex', '1 1 0%', 'important');
                 col.style.setProperty('min-width', '0', 'important');
-                col.style.setProperty('width', 'auto', 'important'); // 移除 Streamlit 原生 100% 寬度限制
+                col.style.setProperty('width', 'auto', 'important'); 
             });
         }
         setTimeout(fixFilter, 50);
@@ -374,7 +366,7 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
-# 數據看板 (Metrics)：預設收合
+# 數據看板 (Metrics)
 log = load_update_log()
 if log:
     update_time = log.get('update_time', '未知')
@@ -383,7 +375,6 @@ if log:
     latest_emails = log.get('latest_emails', 0)
     latest_imos = log.get('latest_imos', 0)
     latest_nodata = log.get('latest_nodata', 0)
-
     total_targets = latest_imos + latest_nodata
 
     with st.expander(f"📊 資料看板：總信件庫 {total_files} 封 ・ 最新 {latest_emails} 封 ・ 最後同步 {update_time}", expanded=False):
@@ -394,16 +385,13 @@ if log:
         col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
-    # 1. 用 HTML 標記一個篩選器專用的 Container ID，方便 CSS 精準定位
+    # 頂部篩選器
     st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
-    
-    # 將比例改為 1:1:1 (平分比例)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
     with c2:
-        # 從資料中撈取所有不重複的狀態，排序後加上「全部」
         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
     with c3:
@@ -411,9 +399,8 @@ if not df.empty:
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
-    st.markdown('</div>', unsafe_allow_html=True) # 結束容器
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # 💥 強制瀏覽器覆寫 CSS 結構，實現手機版不換行
     apply_mobile_filter_layout()
 
     # 資料過濾邏輯
@@ -429,11 +416,9 @@ if not df.empty:
 
     st.info("💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。")
 
-    # === 版面結構 ===
     DF_KEY = "email_table"
-
     if "sel_seq" not in st.session_state:
-        st.session_state.sel_seq = {}   # {row_idx: 序號}
+        st.session_state.sel_seq = {}   
     if "sel_counter" not in st.session_state:
         st.session_state.sel_counter = 0
 
@@ -450,29 +435,26 @@ if not df.empty:
         col_list, col_preview1, col_preview2 = st.columns([1, 1, 1], gap="small")
         preview_cols = [col_preview1, col_preview2]
 
-  with col_list:
-        # 1. 指定顯示的欄位順序（維持 Python 原生欄位名稱「日期」）
-        ordered_columns = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
+    with col_list:
+        # =========================================================
+        # 💡 【動態表格設定區】未來你要改標題或順序，只要在這裡改！
+        # =========================================================
+        # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
+        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-        # 2. 定義狀態背景顏色的 CSS 映射表（使用質感粉彩色，文字為深灰色）
+        # 2. 狀態顏色邏輯
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "APPROVED" in val_upper:
-                return "background-color: #D1E7DD; color: #0F5132; font-weight: bold;" # 綠色
-            elif "COMPLETED" in val_upper:
-                return "background-color: #CFF4FC; color: #087990; font-weight: bold;" # 藍色
-            elif "CANCELLED" in val_upper or "KYC" in val_upper:
-                return "background-color: #F8D7DA; color: #842029; font-weight: bold;" # 紅色
-            elif "PENDING" in val_upper:
-                return "background-color: #FFF3CD; color: #664D03; font-weight: bold;" # 黃色
-            return "" # 其他不變
+            if "APPROVED" in val_upper: return "background-color: #D1E7DD; color: #0F5132; font-weight: bold;"
+            elif "COMPLETED" in val_upper: return "background-color: #CFF4FC; color: #087990; font-weight: bold;"
+            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: #F8D7DA; color: #842029; font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: #FFF3CD; color: #664D03; font-weight: bold;"
+            return ""
 
-        # 3. 將篩選後的資料框擷取指定欄位，並套用樣式（使用新版 map 避開警告）
-        styled_df = display_df[ordered_columns].style.map(style_status, subset=["狀態"])
+        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
         
-        # 4. 渲染表格，並將「日期」欄位的標題指定顯示為「收信時間」
         event = st.dataframe(
-            styled_df,  # 💥 確保傳入的是帶有顏色的 styled_df
+            styled_df,  
             use_container_width=True, 
             hide_index=True, 
             on_select="rerun", 
@@ -480,11 +462,13 @@ if not df.empty:
             key=DF_KEY,
             height=500,
             column_config={
-                "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), # 👈 這裡把標題對外顯示為「收信時間」
+                # 3. 前端動態改名：把原名為 "日期" 的欄位，在畫面上顯示成 "收信時間"！
+                "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
                 "狀態": st.column_config.TextColumn("狀態", width="small"),
-                "主旨": st.column_config.TextColumn("主旨", width="small")
+                "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
             }
         )
+        # =========================================================
         
         st.markdown("<br>", unsafe_allow_html=True)
         exp_c1, exp_c2 = st.columns(2)
