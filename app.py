@@ -351,8 +351,11 @@ if log:
         col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
-    # 頂部篩選器
-    c1, c2, c3 = st.columns([1, 1, 1.5])
+    # 1. 用 HTML 標記一個篩選器專用的 Container ID，方便 CSS 精準定位
+    st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
+    
+    # 將比例改為 1:1:1 (等同於你要求的 4:4:4 平分比例)
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
