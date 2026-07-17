@@ -226,11 +226,11 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
-# 1. 篩選掉已經在前端被標記刪除的資料
+# 1. 篩選掉已經在前端被標記刪除的資料，★ 並透過 reset_index(drop=True) 重製乾淨的索引，避免 IndexingError
 if not df_raw.empty:
-    df = df_raw[~df_raw["_uid"].isin(st.session_state["deleted_uids"])].copy()
+    df = df_raw[~df_raw["_uid"].isin(st.session_state["deleted_uids"])].reset_index(drop=True)
 else:
-    df = df_raw
+    df = df_raw.copy()
 
 if df.empty:
     if not df_raw.empty:
@@ -245,7 +245,8 @@ else:
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date), label_visibility="collapsed")
     
-    mask = pd.Series([True] * len(df))
+    # ★ 改用 df.index 作為 Series 的 index，徹底根絕長度/對齊不一致的問題
+    mask = pd.Series(True, index=df.index)
     if isinstance(sel_range, tuple) and len(sel_range) == 2:
         start_dt = pd.to_datetime(sel_range[0])
         end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
@@ -305,7 +306,7 @@ else:
                 time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
                 callsign_display = f"<span style='color:#A31D1D; font-weight:bold;'>{row['呼號']}</span>" if row['呼號'] == 'KYC' else row['呼號']
                 
-                # ★ 將按鈕設定為 type="primary"，CSS 就會自動將它吸附到右上角！
+                # 將按鈕設定為 type="primary"，CSS 就會自動將它吸附到右上角！
                 if st.button("🗑️ 刪除", type="primary", help="暫時隱藏此筆訂單，匯出時亦會剔除"):
                     st.session_state["deleted_uids"].add(row["_uid"])
                     st.session_state["df_key_counter"] += 1
