@@ -442,13 +442,18 @@ if not df.empty:
         # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-        # 2a. 狀態顏色邏輯
+      # 2a. 狀態顏色邏輯 (背景 30% 不透明度，字體加粗、不變淡且縮小至 12px)
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "APPROVED" in val_upper: return "background-color: rgba(250, 225, 50, 0.3); color: #333300; font-weight: bold;"
-            elif "COMPLETED" in val_upper: return "background-color: rgba(255, 128, 128, 0.3); color: #4a1c1c; font-weight: bold;"
-            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3); color: #4a1c4a; font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.3); color: #664D03; font-weight: bold;"
+            # font-size: 12px 讓字體變小，同時維持原本的高對比度文字顏色
+            if "APPROVED" in val_upper: 
+                return "background-color: rgba(250, 225, 50, 0.3); color: #554400; font-weight: bold; font-size: 10px;"
+            elif "COMPLETED" in val_upper: 
+                return "background-color: rgba(255, 128, 128, 0.3); color: #801a1a; font-weight: bold; font-size: 10px;"
+            elif "CANCELLED" in val_upper or "KYC" in val_upper: 
+                return "background-color: rgba(230, 120, 230, 0.3); color: #661166; font-weight: bold; font-size: 10px;"
+            elif "PENDING" in val_upper: 
+                return "background-color: rgba(255, 243, 205, 0.3); color: #664D03; font-weight: bold; font-size: 10px;"
             return ""
 
 # 2b. 判斷並標示「有效配對」的 IMO 邏輯
