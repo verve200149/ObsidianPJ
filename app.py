@@ -442,25 +442,30 @@ if not df.empty:
         # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-        # 2. 狀態顏色邏輯
+    # 2. 定義狀態背景顏色的 CSS 映射表（透明度 70%）
         def style_status(val):
             val_upper = str(val).upper().strip()
-            # APPROVED: RGB(250, 225, 50)
+            # APPROVED: RGB(250, 225, 50) -> rgba(250, 225, 50, 0.7)
             if "APPROVED" in val_upper: 
-                return "background-color: rgb(250, 225, 50); color: #333300; font-weight: bold;" 
-            # COMPLETED: RGB(255, 128, 128)
+                return "background-color: rgba(250, 225, 50, 0.7); color: #333300; font-weight: bold;" 
+            
+            # COMPLETED: RGB(255, 128, 128) -> rgba(255, 128, 128, 0.7)
             elif "COMPLETED" in val_upper: 
-                return "background-color: rgb(255, 128, 128); color: #4a1c1c; font-weight: bold;" 
-            # CANCELLED: RGB(230, 120, 230)
+                return "background-color: rgba(255, 128, 128, 0.7); color: #4a1c1c; font-weight: bold;" 
+            
+            # CANCELLED: RGB(230, 120, 230) -> rgba(230, 120, 230, 0.7)
             elif "CANCELLED" in val_upper: 
-                return "background-color: rgb(230, 120, 230); color: #4a1c4a; font-weight: bold;" 
-            # KYC未通過 (紅色系):
+                return "background-color: rgba(230, 120, 230, 0.7); color: #4a1c4a; font-weight: bold;" 
+            
+            # KYC未通過 (紅色系) -> rgba(248, 215, 218, 0.7)
             elif "KYC" in val_upper: 
-                return "background-color: #F8D7DA; color: #842029; font-weight: bold;"
-            # PENDING: 黃色系
+                return "background-color: rgba(248, 215, 218, 0.7); color: #842029; font-weight: bold;"
+            
+            # PENDING: 黃色系 -> rgba(255, 243, 205, 0.7)
             elif "PENDING" in val_upper: 
-                return "background-color: #FFF3CD; color: #664D03; font-weight: bold;" 
-            return ""
+                return "background-color: rgba(255, 243, 205, 0.7); color: #664D03; font-weight: bold;" 
+            
+            return "" # 其他不變
 
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
         
