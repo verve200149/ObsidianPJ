@@ -314,10 +314,27 @@ st.markdown("""
         line-height: 1.2;
         white-space: nowrap;
     }
-    @media (max-width: 640px) {
-        .compact-title { font-size: 1.25rem; }
-        div[data-testid="stExpander"] summary { padding: 0.4rem 0.6rem; }
+  /* 手機版篩選器元件內縮與緊湊化，防止同行時內容爆出去 */
+@media (max-width: 640px) {
+    div[id="mobile-filter-container"] label {
+        font-size: 0.75rem !important; /* 縮小上方標題如 「🚢 篩選油輪」 */
     }
+    div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {
+        font-size: 0.75rem !important;
+    }
+    div[id="mobile-filter-container"] div[data-baseweb="select"] {
+        font-size: 0.75rem !important; /* 縮小下拉選單內文字 */
+    }
+    div[id="mobile-filter-container"] input {
+        font-size: 0.7rem !important;  /* 縮小日期輸入框文字 */
+        padding: 2px 4px !important;
+    }
+    /* 讓下拉選單與日期高度更緊湊 */
+    div[id="mobile-filter-container"] div[data-baseweb="base-input"] {
+        min-height: 30px !important;
+        height: 30px !important;
+    }
+}
     </style>
     <div class="compact-title">🚢 船隊實時調度報表</div>
     """, unsafe_allow_html=True)
@@ -353,7 +370,6 @@ if log:
 if not df.empty:
     # 1. 用 HTML 標記一個篩選器專用的 Container ID，方便 CSS 精準定位
     st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
-    
     # 將比例改為 1:1:1 (等同於你要求的 4:4:4 平分比例)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
@@ -368,6 +384,10 @@ if not df.empty:
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
+    st.markdown('</div>', unsafe_allow_html=True) # 結束容器
+
+    # 💥 【在此處呼叫】讓瀏覽器強制重寫 CSS 結構，實現絕對同行
+    apply_mobile_filter_layout()
 
     # 資料過濾邏輯
     mask = pd.Series([True] * len(df))
@@ -493,3 +513,42 @@ if not df.empty:
     # 在「選 1 筆 <-> 選 2 筆」之間切換完全不會走到這裡。
     if (n_selected == 0) != (not guess_has_selection):
         st.rerun()
+
+   # --- 5. 強制手機版篩選器維持同一行不拆行 ---
+   def apply_mobile_filter_layout():
+    js = """
+    <script>
+    (function() {
+        let attempts = 0;
+        function fixFilter() {
+            attempts++;
+            const doc = window.parent.document;
+            const container = doc.getElementById('mobile-filter-container');
+            if (!container) {
+                if (attempts < 30) setTimeout(fixFilter, 80);
+                return;
+            }
+            
+            // 找到 Streamlit 原生的 Columns 橫向區塊
+            const hBlock = container.querySelector('[data-testid="stHorizontalBlock"]');
+            if (!hBlock) return;
+            
+            // 1. 強制 Flex 佈局不換行
+            hBlock.style.setProperty('display', 'flex', 'important');
+            hBlock.style.setProperty('flex-direction', 'row', 'important');
+            hBlock.style.setProperty('flex-wrap', 'nowrap', 'important');
+            hBlock.style.setProperty('gap', '8px', 'important');
+            
+            // 2. 強制子欄位等寬平分 (4:4:4)
+            const cols = Array.from(hBlock.children).filter(c => c.getAttribute && c.getAttribute('data-testid') === 'stColumn');
+            cols.forEach(col => {
+                col.style.setProperty('flex', '1 1 0%', 'important');
+                col.style.setProperty('min-width', '0', 'important');
+                col.style.setProperty('width', 'auto', 'important'); // 幹掉 Streamlit 的 width: 100%
+            });
+        }
+        setTimeout(fixFilter, 50);
+    })();
+    </script>
+    """
+    components.html(js, height=0, width=0)
