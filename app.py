@@ -8,28 +8,19 @@ from datetime import datetime
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
 # ==========================================
-# 🎛️ 側邊欄控制器：介面設定
+# 🎨 自定義 CSS
 # ==========================================
-with st.sidebar:
-    st.markdown("### ⚙️ 介面設定")
-    # 動態字體大小控制器 (預設 11px，範圍 8~20px)
-    table_font_size = st.slider("🔡 調整表格字體大小 (px)", min_value=8, max_value=20, value=11, step=1)
-    st.markdown("---")
-
-# ==========================================
-# 🎨 自定義 CSS (結合動態字體變數)
-# ==========================================
-st.markdown(f"""
+st.markdown("""
     <style>
     /* 調整指標數字大小與顏色 (商務藍) */
-    div[data-testid="stMetricValue"] {{ font-size: 1.8rem; color: #1a73e8; font-weight: 600; }}
+    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
     
     /* 隱藏預設的 DataFrame index */
-    .row_heading.level0 {{display:none}}
-    .blank {{display:none}}
+    .row_heading.level0 {display:none}
+    .blank {display:none}
     
     /* 右側郵件閱讀器的精美樣式 */
-    .email-pane {{ 
+    .email-pane { 
         background-color: #ffffff; 
         color: #333333; 
         padding: 25px; 
@@ -39,57 +30,50 @@ st.markdown(f"""
         height: 500px;
         box-sizing: border-box;
         overflow-y: auto;
-    }}
-    .email-header {{
+    }
+    .email-header {
         border-bottom: 1px solid #eeeeee;
         padding-bottom: 12px;
         margin-bottom: 20px;
-    }}
-    .email-subject {{ 
+    }
+    .email-subject { 
         font-size: 1.3em; 
         font-weight: bold; 
         color: #202124; 
         margin-bottom: 8px;
-    }}
-    .email-meta {{
+    }
+    .email-meta {
         font-size: 0.9em; 
         color: #5f6368; 
-    }}
-    .email-body {{
+    }
+    .email-body {
         white-space: pre-wrap; 
         font-family: 'Consolas', 'Courier New', monospace; 
         font-size: 14px;
         line-height: 1.6;
         color: #444444;
-    }}
-
-    /* 💥 強制套用側邊欄設定的字體大小到 DataFrame */
-    div[data-testid="stDataFrame"] *, 
-    div[data-testid="stDataFrame"] table, 
-    div[data-testid="stDataFrame"] div {{
-        font-size: {table_font_size}px !important;
-    }}
+    }
 
     /* 手機版篩選器元件內縮與緊湊化 */
-    @media (max-width: 640px) {{
-        div[id="mobile-filter-container"] label {{
+    @media (max-width: 640px) {
+        div[id="mobile-filter-container"] label {
             font-size: 0.75rem !important; 
-        }}
-        div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {{
+        }
+        div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {
             font-size: 0.75rem !important;
-        }}
-        div[id="mobile-filter-container"] div[data-baseweb="select"] {{
+        }
+        div[id="mobile-filter-container"] div[data-baseweb="select"] {
             font-size: 0.75rem !important; 
-        }}
-        div[id="mobile-filter-container"] input {{
+        }
+        div[id="mobile-filter-container"] input {
             font-size: 0.7rem !important;  
             padding: 2px 4px !important;
-        }}
-        div[id="mobile-filter-container"] div[data-baseweb="base-input"] {{
+        }
+        div[id="mobile-filter-container"] div[data-baseweb="base-input"] {
             min-height: 30px !important;
             height: 30px !important;
-        }}
-    }}
+        }
+    }
     </style>
     """, unsafe_allow_html=True)
 
