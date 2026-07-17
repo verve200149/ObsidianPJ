@@ -41,21 +41,24 @@ st.markdown("""
 
 
 @st.cache_data(ttl=600)
-def load_whitelist_imos():
-    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳有效 IMO 的 Set。
-
-    ⚠️ 驗證規則跟根目錄 app.py 的 load_ship_map() 保持完全一致：
-       - 用 utf-8-sig 開檔（處理檔案開頭的 BOM，避免 JSON 解析失敗）
-       - 欄位是小寫的 'imo'（先前這裡誤寫成大寫 'IMO'，導致白名單永遠是空集合，
-         造成每一筆訂單都被誤判成 KYC 警示）
+def load_whitelist_dict():
+    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳 Dict {imo: callSign}。
+    
+    ⚠️ 驗證規則保持一致：
+       - 用 utf-8-sig 開檔（處理檔案開頭的 BOM）
+       - 將 'imo' 當作鍵 (Key)，'callSign' (或小寫 callsign) 當作值 (Value)
     """
     if os.path.exists("Kingdee_Export_UTF8.json"):
         try:
             with open("Kingdee_Export_UTF8.json", "r", encoding="utf-8-sig") as f:
-                return {str(item.get("imo", "")).strip() for item in json.load(f)}
+                data = json.load(f)
+                return {
+                    str(item.get("imo", "")).strip(): str(item.get("callSign", item.get("callsign", ""))).strip()
+                    for item in data if str(item.get("imo", "")).strip()
+                }
         except Exception as e:
             st.sidebar.warning(f"⚠️ 無法讀取 Kingdee_Export_UTF8.json: {e}")
-    return set()
+    return {}
 
 
 def parse_metadata_robust(header_text: str) -> dict:
@@ -87,8 +90,8 @@ def load_cn_data():
     parse_errors = []
     base_dir = "data_CN"
 
-    # 載入 Kingdee 白名單
-    valid_imos = load_whitelist_imos()
+    # 載入 Kingdee 白名單 (Dict)
+    valid_imos_dict = load_whitelist_dict()
 
     if not os.path.isdir(base_dir):
         return pd.DataFrame(), parse_errors
@@ -126,7 +129,7 @@ def load_cn_data():
                     except Exception:
                         pass
 
-                # 處理寄件者：若有稱號則只留稱號，若為純信箱則取 @ 之前的部分
+                # 處理寄件者
                 sender_val = str(fm.get("sender", "-") or "-").strip()
                 if len(sender_val.split()) == 1 and "@" in sender_val:
                     sender_clean = sender_val.split("@")[0].replace("<", "").replace(">", "")
@@ -139,22 +142,23 @@ def load_cn_data():
                 else:
                     sender_clean = sender_val
 
-                # IMO 擷取邏輯：使用 re.findall 抓取所有符合的 IMO 號碼
+                # IMO 擷取邏輯
                 contact_val = str(fm.get("contact", "-") or "-")
                 imo_matches = re.findall(r"IMO.*?(\d{7})", contact_val, re.IGNORECASE)
 
-                # 如果都沒抓到 IMO，給一個空字串讓這封信還是能建立一筆資料
                 if not imo_matches:
                     imo_matches = [""]
 
-                # 迴圈處理：有幾個 IMO，就建立幾筆獨立的資料列 (Row)
+                # 迴圈處理 IMO 並判定「呼號」
                 for imo_num in imo_matches:
                     if not imo_num:
-                        alert_status = "無IMO"
-                    elif imo_num in valid_imos:
-                        alert_status = ""  # 吻合白名單，留空
+                        callsign_status = "無IMO"
+                    elif imo_num in valid_imos_dict:
+                        # 吻合時帶出對應的 callSign
+                        callsign_status = valid_imos_dict[imo_num]
                     else:
-                        alert_status = "KYC"
+                        # 不吻合時填上 KYC
+                        callsign_status = "KYC"
 
                     rows.append({
                         "日期": parsed_date,
@@ -164,7 +168,7 @@ def load_cn_data():
                         "IMO": imo_num,
                         "聯繫方式": contact_val,
                         "放行狀態": fm.get("release_status", "-") or "-",
-                        "警示": alert_status, 
+                        "呼號": callsign_status,  # <-- 變更為呼號
                         "原始內文": body,
                     })
             except Exception as e:
@@ -195,6 +199,7 @@ def build_cn_excel(export_df: pd.DataFrame) -> bytes:
 
 
 def style_alerts(val):
+    """只有在不吻合 (KYC) 的時候背景才標紅"""
     if val == "KYC":
         return "background-color: #A31D1D; color: white;" 
     return ""
@@ -224,15 +229,16 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
-    # 調整欄位順序：聯繫方式 在 IMO 前面
-    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "警示", "原始內文"]
+    # 調整欄位順序：聯繫方式 在 IMO 前面，並將「警示」替換為「呼號」
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "呼號", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
     st.caption(f"共 {len(display_df)} 筆資料")
 
     show_df = display_df.drop(columns=["原始內文"])
     styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
-    styled_df = styler_method(style_alerts, subset=["警示"]) if styler_method else show_df
+    # 將樣式應用目標替換為 "呼號"
+    styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
 
     event = st.dataframe(
         styled_df,
@@ -248,7 +254,7 @@ else:
             "IMO": st.column_config.TextColumn("IMO", width="small"),
             "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
-            "警示": st.column_config.TextColumn("警示", width="small"),
+            "呼號": st.column_config.TextColumn("呼號", width="small"),
         }
     )
 
@@ -260,13 +266,12 @@ else:
         <div class="email-pane">
             <div class="email-subject">{row['主旨']}</div>
             <div class="email-meta">
-                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ {row['警示']}
+                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ 呼號: {row['呼號']}
             </div>
             <div class="email-body">{row["原始內文"]}</div>
         </div>
         ''', unsafe_allow_html=True)
 
-    # 移除原本的 st.columns，直接放置獨立的 Excel 下載按鈕
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
