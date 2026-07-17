@@ -6,6 +6,36 @@ import os
 st.set_page_config(layout="wide", page_title="白名單清單", page_icon="📜")
 
 # ==========================================
+# 🔐 密碼保護機制
+# ==========================================
+if "whitelist_authenticated" not in st.session_state:
+    st.session_state["whitelist_authenticated"] = False
+
+if not st.session_state["whitelist_authenticated"]:
+    # 建立一個置中的畫面佈局來放密碼框
+    st.markdown("<br><br><br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+            <div style='text-align: center;'>
+                <h2 style='color: #4A90E2;'>🔒 白名單管理系統</h2>
+                <p style='color: #888;'>此頁面受密碼保護，請輸入預設密碼解鎖</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        pwd_input = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="請輸入密碼 (預設: 0000)")
+        
+        if st.button("🔓 確認解鎖", type="primary", use_container_width=True):
+            if pwd_input == "0000":
+                st.session_state["whitelist_authenticated"] = True
+                st.rerun()  # 密碼正確，重新整理頁面載入下方主程式
+            else:
+                st.error("❌ 密碼錯誤，請重新輸入！")
+                
+    # 🌟 關鍵：停止執行後續所有程式碼，直到密碼正確為止
+    st.stop()
+
+# ==========================================
 # 🎨 CSS 樣式增強 (高度精準對齊、視覺美化)
 # ==========================================
 st.markdown("""
