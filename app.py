@@ -447,13 +447,13 @@ if not df.empty:
             val_upper = str(val).upper().strip()
             # 💡 拿掉 color 與 font-weight，只留背景色與縮小字體
             if "APPROVED" in val_upper: 
-                return "background-color: rgba(250, 225, 50, 0.3); font-size: 11px;"
+                return "background-color: rgba(250, 225, 50, 0.3); font-size: 9px;"
             elif "COMPLETED" in val_upper: 
-                return "background-color: rgba(255, 128, 128, 0.3); font-size: 11px;"
+                return "background-color: rgba(255, 128, 128, 0.3); font-size: 9px;"
             elif "CANCELLED" in val_upper or "KYC" in val_upper: 
-                return "background-color: rgba(230, 120, 230, 0.3); font-size: 11px;"
+                return "background-color: rgba(230, 120, 230, 0.3); font-size: 9px;"
             elif "PENDING" in val_upper: 
-                return "background-color: rgba(255, 243, 205, 0.3); font-size: 11px;"
+                return "background-color: rgba(255, 243, 205, 0.3); font-size: 9px;"
             return ""
 
         valid_dup_indices = set()
