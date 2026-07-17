@@ -451,9 +451,11 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
-        ordered_columns = ["日期", "狀態", "油輪", "船名", "呼號", "ETA", "位置", "主旨", "IMO"]
+        # 1. 在此指定你要顯示的欄位順序（將「狀態」拉到「日期」後面）
+        ordered_columns = [ "油輪", "日期", "狀態","船名","IMO", "呼號", "ETA", "位置",  "主旨"]
+        
         event = st.dataframe(
-            display_df.drop(columns=["原始內文"]), 
+            display_df[ordered_columns],  # 套用新的欄位順序，同時自然排除了「原始內文」
             use_container_width=True, 
             hide_index=True, 
             on_select="rerun", 
@@ -462,6 +464,7 @@ if not df.empty:
             height=500,
             column_config={
                 "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"), 
+                "狀態": st.column_config.TextColumn("狀態", width="small"),
                 "主旨": st.column_config.TextColumn("主旨", width="medium")
             }
         )
