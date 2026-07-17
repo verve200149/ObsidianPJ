@@ -6,7 +6,7 @@ import os
 st.set_page_config(layout="wide", page_title="白名單清單", page_icon="📜")
 
 # ==========================================
-# 🎨 CSS 樣式增強 (高度精準對齊、視覺美化、工具列置頂)
+# 🎨 CSS 樣式增強 (高度精準對齊、視覺美化)
 # ==========================================
 st.markdown("""
     <style>
@@ -42,26 +42,16 @@ st.markdown("""
         height: 46px !important;
         border-radius: 8px !important;
         font-weight: bold !important;
-        font-size: 1.05rem !important;
+        font-size: 1.1rem !important;
         transition: all 0.2s ease-in-out !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
     }
     div[data-testid="stButton"] > button:hover,
     div[data-testid="stDownloadButton"] > button:hover {
         transform: translateY(-2px);
         box-shadow: 0 4px 8px rgba(0,0,0,0.2) !important;
-    }
-
-    /* === 🚀 表格右上角原生工具列放大置頂 === */
-    [data-testid="stElementToolbar"] {
-        transform: scale(1.4);       
-        transform-origin: top right; 
-        opacity: 0.9 !important;     
-        z-index: 99999 !important;   
-    }
-    [data-testid="stElementToolbar"]:hover {
-        transform: scale(1.5);
-        opacity: 1 !important;
-        z-index: 99999 !important;   
     }
     </style>
     <div class="compact-title">📜 白名單管理系統</div>
@@ -88,7 +78,8 @@ if "whitelist_df" not in st.session_state:
 # 2. 控制欄位區 (對齊搜尋、新增列 與 匯出按鈕)
 # ==========================================
 st.markdown("#### 🔍 全局搜尋與操作")
-col_search, col_add, col_export = st.columns([5, 2, 2])
+# 微調比例：搜尋框佔 6，新增按鈕佔 2，純 Icon 的匯出按鈕佔 1
+col_search, col_add, col_export = st.columns([6, 2, 1])
 
 with col_search:
     # 隱藏預設 label，對齊按鈕
@@ -116,12 +107,13 @@ with col_export:
     
     json_data = export_df.to_dict(orient="records")
     st.download_button(
-        label="📩 匯出全部資料",
+        label="📩",  # 拿掉文字，只留圖示，畫面更簡潔
         data=json.dumps(json_data, ensure_ascii=False, indent=4).encode("utf-8-sig"),
         file_name="Kingdee_Export_UTF8.json",
         mime="application/json",
         type="primary",
-        use_container_width=True 
+        use_container_width=True,
+        help="匯出全部資料 (存檔為 Kingdee_Export_UTF8.json)"
     )
 
 # ==========================================
