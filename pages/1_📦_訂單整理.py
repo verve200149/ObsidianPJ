@@ -251,9 +251,16 @@ else:
         start_dt = pd.to_datetime(sel_range[0])
         end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
         mask &= (df["日期"] >= start_dt) & (df["日期"] <= end_dt)
-
+    # 1. 篩選與排序
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
+    # 🚀 修改點：將調整欄位順序的邏輯移到匯出按鈕「之前」
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "呼號", "_uid", "原始內文"]
+    display_df = display_df[[c for c in col_order if c in display_df.columns]]
+
+    
+
+      # 2. 此時的 display_df 已經跟前端顯示的排序一模一樣，再傳給 Excel 產生器
     with ctrl_col2:
         st.download_button(
             f"🗂️ 匯出 {len(display_df)} 筆",
@@ -262,10 +269,7 @@ else:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "呼號", "_uid", "原始內文"]
-    display_df = display_df[[c for c in col_order if c in display_df.columns]]
-
-    # 隱藏用不到的底層資料
+    # 3. 隱藏用不到的底層資料（後續交給 Streamlit 渲染表格）
     show_df = display_df.drop(columns=["原始內文", "_uid"], errors="ignore")
     styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
     styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
