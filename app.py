@@ -445,10 +445,21 @@ if not df.empty:
         # 2. 狀態顏色邏輯
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "APPROVED" in val_upper: return "background-color: #D1E7DD; color: #0F5132; font-weight: bold;"
-            elif "COMPLETED" in val_upper: return "background-color: #CFF4FC; color: #087990; font-weight: bold;"
-            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: #F8D7DA; color: #842029; font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: #FFF3CD; color: #664D03; font-weight: bold;"
+            # APPROVED: RGB(250, 225, 50)
+            if "APPROVED" in val_upper: 
+                return "background-color: rgb(250, 225, 50); color: #333300; font-weight: bold;" 
+            # COMPLETED: RGB(255, 128, 128)
+            elif "COMPLETED" in val_upper: 
+                return "background-color: rgb(255, 128, 128); color: #4a1c1c; font-weight: bold;" 
+            # CANCELLED: RGB(230, 120, 230)
+            elif "CANCELLED" in val_upper: 
+                return "background-color: rgb(230, 120, 230); color: #4a1c4a; font-weight: bold;" 
+            # KYC未通過 (紅色系):
+            elif "KYC" in val_upper: 
+                return "background-color: #F8D7DA; color: #842029; font-weight: bold;"
+            # PENDING: 黃色系
+            elif "PENDING" in val_upper: 
+                return "background-color: #FFF3CD; color: #664D03; font-weight: bold;" 
             return ""
 
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
