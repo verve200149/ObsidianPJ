@@ -5,96 +5,98 @@ import os
 
 st.set_page_config(layout="wide", page_title="白名單清單", page_icon="📜")
 
+# CSS 樣式增強：讓標題與搜尋框更醒目
 st.markdown("""
     <style>
     .compact-title {
         font-size: 1.8rem;
         font-weight: 800;
-        margin: 0 0 0.4rem 0;
-        line-height: 1.2;
-        white-space: nowrap;
+        margin: 0 0 1rem 0;
+        color: #1E3A8A; /* 深藍色，醒目 */
     }
-    @media (max-width: 640px) {
-        .compact-title { font-size: 1.25rem; }
+    .search-box {
+        background-color: #F3F4F6;
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid #E5E7EB;
     }
     </style>
     <div class="compact-title">📜 金蝶白名單管理</div>
     """, unsafe_allow_html=True)
 
-# 定義檔案路徑 (對應到主程式根目錄)
 FILE_PATH = "Kingdee_Export_UTF8.json"
 
 # ==========================================
-# 1. 讀取 JSON 資料並存入 Session State
+# 1. 載入資料 (Session State 管理)
 # ==========================================
-def load_json_data():
-    """讀取 JSON 檔案，確保使用 utf-8-sig 處理 BOM"""
-    if os.path.exists(FILE_PATH):
-        try:
-            with open(FILE_PATH, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-                return data
-        except Exception as e:
-            st.error(f"⚠️ 無法讀取 {FILE_PATH}: {e}")
-            return []
-    else:
-        st.warning(f"⚠️ 找不到檔案 {FILE_PATH}，將建立全新的空白清單。")
-        return []
-
-# 確保資料只在第一次進入時讀取，之後的修改保留在 Session State 中
 if "whitelist_df" not in st.session_state:
-    raw_data = load_json_data()
-    # 轉成 DataFrame
-    st.session_state["whitelist_df"] = pd.DataFrame(raw_data)
-
-st.info("💡 **操作提示**：\n"
-        "1. **修改**：直接對著表格欄位「雙擊滑鼠」即可編輯內容。\n"
-        "2. **新增**：捲動到表格最下方，點擊灰色的空白列即可新增一筆。\n"
-        "3. **刪除**：勾選表格最左側的核取方塊，並按下鍵盤的 `Delete` 鍵。")
+    if os.path.exists(FILE_PATH):
+        with open(FILE_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+            st.session_state["whitelist_df"] = pd.DataFrame(data)
+    else:
+        st.session_state["whitelist_df"] = pd.DataFrame(columns=["imo", "callSign"])
 
 # ==========================================
-# 2. 顯示互動式 Data Editor
+# 2. 控制欄位區 (搜尋 + 匯出)
 # ==========================================
-# 讓使用者可以自由編輯，num_rows="dynamic" 允許新增與刪除列
+col_search, col_export = st.columns([4, 1])
+
+with col_search:
+    search_term = st.text_input("🔍 全局搜尋 (搜尋 IMO 或 呼號)", "", help="輸入關鍵字即可過濾所有欄位")
+
+with col_export:
+    st.write("###") # 對齊按鈕
+    # 這裡匯出的是整個 Master DataFrame (st.session_state["whitelist_df"])
+    json_data = st.session_state["whitelist_df"].to_dict(orient="records")
+    st.download_button(
+        label="💾 匯出全部資料",
+        data=json.dumps(json_data, ensure_ascii=False, indent=4).encode("utf-8-sig"),
+        file_name="Kingdee_Export_UTF8.json",
+        mime="application/json",
+        type="primary"
+    )
+
+# ==========================================
+# 3. 處理搜尋邏輯
+# ==========================================
+df = st.session_state["whitelist_df"]
+
+if search_term:
+    # 進行全欄位搜尋
+    mask = df.apply(lambda row: row.astype(str).str.contains(search_term, case=False).any(), axis=1)
+    filtered_df = df[mask]
+    st.warning(f"顯示搜尋結果：共 {len(filtered_df)} 筆")
+else:
+    filtered_df = df
+
+# ==========================================
+# 4. 互動式表格 (Data Editor)
+# ==========================================
+st.markdown("---")
+
+# 這裡設定 column_order 確保 imo 永遠在第一行
 edited_df = st.data_editor(
-    st.session_state["whitelist_df"],
+    filtered_df,
     use_container_width=True,
     num_rows="dynamic",
-    height=600,
     key="whitelist_editor",
-    # 設定特定欄位的顯示格式，避免 IMO 被當作數字加上千分號 (例如 1,234,567)
+    column_order=["imo", "callSign"] + [c for c in df.columns if c not in ["imo", "callSign"]],
     column_config={
-        "imo": st.column_config.TextColumn("IMO (國際海事組織編號)", required=True),
-        "callSign": st.column_config.TextColumn("呼號 (Call Sign)"),
-        "callsign": st.column_config.TextColumn("呼號 (小寫)"), # 預防 JSON 內有大小寫混雜的狀況
+        "imo": st.column_config.TextColumn("IMO (第一優先)", required=True, width="medium"),
+        "callSign": st.column_config.TextColumn("呼號", width="medium"),
     }
 )
 
 # ==========================================
-# 3. 將編輯後的資料轉回 JSON 並提供下載
+# 5. 自動同步變更回主清單
 # ==========================================
-# 整理資料：把 NaN 填補為空字串，避免輸出成 null
-export_df = edited_df.fillna("")
-
-# 將 DataFrame 轉回 List of Dictionaries
-export_data = export_df.to_dict(orient="records")
-
-# 轉換成格式化的 JSON 字串 (ensure_ascii=False 確保中文正常顯示)
-json_str = json.dumps(export_data, ensure_ascii=False, indent=4)
-
-st.markdown("---")
-col1, col2 = st.columns([1, 4])
-
-with col1:
-    # 下載按鈕：打包成 utf-8-sig 編碼，維持與原系統相容
-    st.download_button(
-        label="💾 匯出更新後的 JSON",
-        data=json_str.encode("utf-8-sig"),
-        file_name="Kingdee_Export_UTF8.json",
-        mime="application/json",
-        type="primary",
-        help="下載後，請直接覆蓋專案根目錄的 Kingdee_Export_UTF8.json 並 Commit 到 GitHub！"
-    )
-    
-with col2:
-    st.caption(f"目前共 {len(export_df)} 筆白名單資料準備匯出。")
+# 如果是在搜尋模式下，直接修改會導致「被過濾掉的資料消失」
+# 所以我們這裡做個防呆：如果正在搜尋，不自動儲存，提示使用者
+if search_term:
+    st.info("⚠️ **搜尋模式下無法直接儲存變更**。請清除搜尋框後再進行新增或刪除，以確保資料完整。")
+else:
+    # 沒有搜尋時，自動同步變更
+    if not edited_df.equals(st.session_state["whitelist_df"]):
+        st.session_state["whitelist_df"] = edited_df
+        st.rerun()
