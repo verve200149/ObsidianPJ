@@ -165,8 +165,8 @@ else:
             hide_index=True,
             column_order=["imo", "callSign"] + [c for c in df.columns if c not in ["imo", "callSign"]],
             column_config={
-                "imo": st.column_config.TextColumn("IMO (第一優先)", width="medium"),
-                "callSign": st.column_config.TextColumn("呼號", width="medium"),
+                "imo": st.column_config.TextColumn("IMO", width="smaill"),
+                "callSign": st.column_config.TextColumn("呼號", width="smaill"),
             }
         )
     else:
@@ -179,8 +179,8 @@ else:
             hide_index=True,
             column_order=["imo", "callSign"] + [c for c in df.columns if c not in ["imo", "callSign"]],
             column_config={
-                "imo": st.column_config.TextColumn("IMO (第一優先)", required=True, width="medium"),
-                "callSign": st.column_config.TextColumn("呼號", width="medium"),
+                "imo": st.column_config.TextColumn("IMO", required=True, width="smaill"),
+                "callSign": st.column_config.TextColumn("呼號", width="smaill"),
             }
         )
 
