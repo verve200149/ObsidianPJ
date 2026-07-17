@@ -451,6 +451,7 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
+        ordered_columns = ["日期", "狀態", "油輪", "船名", "呼號", "ETA", "位置", "主旨", "IMO"]
         event = st.dataframe(
             display_df.drop(columns=["原始內文"]), 
             use_container_width=True, 
