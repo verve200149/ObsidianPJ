@@ -7,13 +7,13 @@ from datetime import datetime
 # 建議將網頁預設為寬螢幕佈局
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
-# 自定義 CSS (打造清爽的郵箱風格 UI + 手機版篩選器強制同行優化)
+# 自定義 CSS (打造清爽的郵箱風格 UI + 手機版篩選器強制同行優化 + 強制表格特定欄位字體縮小)
 st.markdown("""
     <style>
     /* 調整指標數字大小與顏色 (商務藍) */
     div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
     
-    /* 隱藏預設的 DataFrame index */
+    /* 隱則預設的 DataFrame index */
     .row_heading.level0 {display:none}
     .blank {display:none}
     
@@ -50,6 +50,12 @@ st.markdown("""
         font-size: 14px;
         line-height: 1.6;
         color: #444444;
+    }
+
+    /* 💥 【全新加強】強制讓 Streamlit 表格內部的特定單元格字體縮小且不加粗 */
+    div[data-testid="stDataFrame"] table, 
+    div[data-testid="stDataFrame"] div {
+        font-size: 12px !important; /* 全局表格微縮 */
     }
 
     /* 手機版篩選器元件內縮與緊湊化，防止同行時內容爆出去 */
@@ -124,7 +130,7 @@ def parse_ship_entries(target):
     return res
 
 @st.cache_data(ttl=60)
-def build_tanker_excel(full_df: pd.DataFrame) -> bytes:  # 💥 修正 SyntaxError
+def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
     """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
     每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
     output = io.BytesIO()
@@ -157,7 +163,6 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:  # 💥 修正 SyntaxErr
             ws.freeze_panes = "A2"
 
         if not tankers:
-            # 💥 修正 SyntaxError
             pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
 
     return output.getvalue()
@@ -168,7 +173,7 @@ def load_all_data():
     parse_errors = []
     DATA_DIR = 'data_John'
     if not os.path.exists(DATA_DIR):
-        return pd.DataFrame(rows), parse_errors # 💥 修正 SyntaxError
+        return pd.DataFrame(rows), parse_errors
         
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
@@ -202,7 +207,7 @@ def load_all_data():
                     is_kyc_fail = (s['imo'] != "-" and s['imo'] not in ship_map)
                     rows.append({
                         "油輪": clean_mail_field(fm.get('ships', '')).split('@')[0] or '-',
-                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT, # 內部維持叫「日期」
+                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT,
                         "位置": fm.get('Position', '-') or '-',
                         "船名": s_info.get('name', s['fv']),
                         "狀態": "KYC未通過" if is_kyc_fail else str(fm.get('category', 'PENDING')).upper(),
@@ -215,7 +220,6 @@ def load_all_data():
             except Exception as e:
                 parse_errors.append((fpath, f"{type(e).__name__}: {e}"))
                 continue
-    # 💥 修正 SyntaxError
     return pd.DataFrame(rows), parse_errors
 
 # --- 4. 分割版面 (固定 3 欄結構) ---
@@ -442,20 +446,20 @@ if not df.empty:
         # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-# 2a. 狀態顏色邏輯 (只設定 30% 背景色，文字完全使用預設色、不加粗、文字縮小至 11px)
+        # 2a. 狀態顏色邏輯 (只設定 30% 背景色，徹底拿掉 color 與 font-weight，交給原生系統與全局 CSS 控管)
         def style_status(val):
             val_upper = str(val).upper().strip()
-            # 💡 拿掉 color 與 font-weight，只留背景色與縮小字體
             if "APPROVED" in val_upper: 
-                return "background-color: rgba(250, 225, 50, 0.3); font-size: 9px;"
+                return "background-color: rgba(250, 225, 50, 0.3);"
             elif "COMPLETED" in val_upper: 
-                return "background-color: rgba(255, 128, 128, 0.3); font-size: 9px;"
+                return "background-color: rgba(255, 128, 128, 0.3);"
             elif "CANCELLED" in val_upper or "KYC" in val_upper: 
-                return "background-color: rgba(230, 120, 230, 0.3); font-size: 9px;"
+                return "background-color: rgba(230, 120, 230, 0.3);"
             elif "PENDING" in val_upper: 
-                return "background-color: rgba(255, 243, 205, 0.3); font-size: 9px;"
+                return "background-color: rgba(255, 243, 205, 0.3);"
             return ""
 
+        # 2b. 判斷並標示「有效配對」的 IMO 邏輯 (只設定 50% 背景色，徹底拿掉文字自定義，交給原生處理)
         valid_dup_indices = set()
         valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
         valid_df = display_df[valid_imo_mask]
@@ -477,11 +481,11 @@ if not df.empty:
                                 valid_dup_indices.add(c_idx)
 
         def style_duplicate_imo(s):
-            return ['background-color: rgba(253, 126, 20, 0.2); font-weight: bold;' if i in valid_dup_indices else '' for i in s.index]
+            return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
             
         # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
-        styled_df = styled_df.apply(style_duplicate_imo, subset=["IMO"]) # 👈 在這疊加上去！
+        styled_df = styled_df.apply(style_duplicate_imo, subset=["IMO"])
         
         event = st.dataframe(
             styled_df,  
