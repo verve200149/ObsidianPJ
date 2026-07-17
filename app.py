@@ -124,7 +124,7 @@ def parse_ship_entries(target):
     return res
 
 @st.cache_data(ttl=60)
-def build_tanker_excel(full_df: pd.) -> bytes:
+def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
     """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
     每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
     output = io.BytesIO()
