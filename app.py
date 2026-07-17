@@ -232,7 +232,7 @@ def apply_split_layout(marker_id: str, n_selected: int):
             const allBlocks = Array.from(doc.querySelectorAll('[data-testid="stHorizontalBlock"]'));
             for (const b of allBlocks) {{
                 if (marker.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) return b;
-            }
+            }}
             return null;
         }}
 
