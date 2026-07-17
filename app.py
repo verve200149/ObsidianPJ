@@ -13,7 +13,7 @@ st.markdown("""
     /* 調整指標數字大小與顏色 (商務藍) */
     div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1a73e8; font-weight: 600; }
     
-    /* 隱藏預設的 DataFrame index */
+    /* 隱藏預設的  index */
     .row_heading.level0 {display:none}
     .blank {display:none}
     
@@ -124,7 +124,7 @@ def parse_ship_entries(target):
     return res
 
 @st.cache_data(ttl=60)
-def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
+def build_tanker_excel(full_df: pd.) -> bytes:
     """把「全部資料」(不受網頁篩選條件影響) 依油輪分頁匯出成一份 Excel，
     每個分頁就是一艘油輪的完整資料範圍，分頁名稱直接用油輪代碼命名。"""
     output = io.BytesIO()
@@ -160,7 +160,7 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 
         if not tankers:
             # 沒有任何資料時，至少寫一個空白分頁，避免 Excel 檔案無法開啟
-            pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
+            pd.().to_excel(writer, sheet_name="無資料", index=False)
 
     return output.getvalue()
 
@@ -171,7 +171,7 @@ def load_all_data():
     DATA_DIR = 'data_John'
     # 如果資料夾還不存在，直接回傳空資料
     if not os.path.exists(DATA_DIR):
-        return pd.DataFrame(rows), parse_errors
+        return pd.(rows), parse_errors
     # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
@@ -221,7 +221,7 @@ def load_all_data():
             except Exception as e:
                 parse_errors.append((fpath, f"{type(e).__name__}: {e}"))
                 continue
-    return pd.DataFrame(rows), parse_errors
+    return pd.(rows), parse_errors
 
 # --- 4. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示) ---
 def apply_split_layout(marker_id: str, n_selected: int):
@@ -450,12 +450,29 @@ if not df.empty:
         col_list, col_preview1, col_preview2 = st.columns([1, 1, 1], gap="small")
         preview_cols = [col_preview1, col_preview2]
 
-    with col_list:
-        # 1. 在此指定你要顯示的欄位順序（將「狀態」拉到「日期」後面）
-        ordered_columns = [ "油輪", "日期", "狀態","船名","IMO", "呼號", "ETA", "位置",  "主旨"]
+  with col_list:
+        # 1. 指定顯示的欄位順序（維持 Python 原生欄位名稱「日期」）
+        ordered_columns = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
+
+        # 2. 定義狀態背景顏色的 CSS 映射表（使用質感粉彩色，文字為深灰色）
+        def style_status(val):
+            val_upper = str(val).upper().strip()
+            if "APPROVED" in val_upper:
+                return "background-color: #D1E7DD; color: #0F5132; font-weight: bold;" # 綠色
+            elif "COMPLETED" in val_upper:
+                return "background-color: #CFF4FC; color: #087990; font-weight: bold;" # 藍色
+            elif "CANCELLED" in val_upper or "KYC" in val_upper:
+                return "background-color: #F8D7DA; color: #842029; font-weight: bold;" # 紅色
+            elif "PENDING" in val_upper:
+                return "background-color: #FFF3CD; color: #664D03; font-weight: bold;" # 黃色
+            return "" # 其他不變
+
+        # 3. 將篩選後的資料框擷取指定欄位，並套用樣式（使用新版 map 避開警告）
+        styled_df = display_df[ordered_columns].style.map(style_status, subset=["狀態"])
         
+        # 4. 渲染表格，並將「日期」欄位的標題指定顯示為「收信時間」
         event = st.dataframe(
-            display_df[ordered_columns],  # 套用新的欄位順序，同時自然排除了「原始內文」
+            styled_df,  # 💥 確保傳入的是帶有顏色的 styled_df
             use_container_width=True, 
             hide_index=True, 
             on_select="rerun", 
@@ -463,9 +480,9 @@ if not df.empty:
             key=DF_KEY,
             height=500,
             column_config={
-                "日期": st.column_config.DatetimeColumn("時間", format="MM/DD HH:mm"), 
+                "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), # 👈 這裡把標題對外顯示為「收信時間」
                 "狀態": st.column_config.TextColumn("狀態", width="small"),
-                "主旨": st.column_config.TextColumn("主旨", width="medium")
+                "主旨": st.column_config.TextColumn("主旨", width="small")
             }
         )
         
