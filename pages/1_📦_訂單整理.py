@@ -18,16 +18,11 @@ st.markdown("""
         .compact-title { font-size: 1.25rem; }
     }
     .email-pane {
-        background-color: #ffffff;
+        background-color: transparent;
         color: #333333;
-        padding: 20px;
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-        margin-top: 0.5rem;
     }
-    .email-subject { font-size: 1.15em; font-weight: bold; color: #202124; margin-bottom: 8px; }
-    .email-meta { font-size: 0.9em; color: #5f6368; margin-bottom: 12px; }
+    .email-subject { font-size: 1.2em; font-weight: bold; color: #202124; margin-bottom: 8px; }
+    .email-meta { font-size: 0.95em; color: #5f6368; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eaeaea; }
     .email-body {
         white-space: pre-wrap;
         font-family: 'Consolas', 'Courier New', monospace;
@@ -42,12 +37,7 @@ st.markdown("""
 
 @st.cache_data(ttl=600)
 def load_whitelist_dict():
-    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳 Dict {imo: callSign}。
-    
-    ⚠️ 驗證規則保持一致：
-       - 用 utf-8-sig 開檔（處理檔案開頭的 BOM）
-       - 將 'imo' 當作鍵 (Key)，'callSign' (或小寫 callsign) 當作值 (Value)
-    """
+    """讀取 Kingdee 輸出的 JSON 作為白名單比對，回傳 Dict {imo: callSign}。"""
     if os.path.exists("Kingdee_Export_UTF8.json"):
         try:
             with open("Kingdee_Export_UTF8.json", "r", encoding="utf-8-sig") as f:
@@ -168,7 +158,7 @@ def load_cn_data():
                         "IMO": imo_num,
                         "聯繫方式": contact_val,
                         "放行狀態": fm.get("release_status", "-") or "-",
-                        "呼號": callsign_status,  # <-- 變更為呼號
+                        "呼號": callsign_status,
                         "原始內文": body,
                     })
             except Exception as e:
@@ -216,11 +206,14 @@ if parse_errors:
 if df.empty:
     st.info("目前 `data_CN/` 資料夾內沒有可解析的資料。")
 else:
-    valid_dates = df["日期"].dropna()
-    m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
-    x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
-    sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
-
+    # 頂部控制區塊 (日期範圍 與 下載按鈕 排在同一列)
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 3])
+    with ctrl_col1:
+        valid_dates = df["日期"].dropna()
+        m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
+        x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
+        sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date), label_visibility="collapsed")
+    
     mask = pd.Series([True] * len(df))
     if isinstance(sel_range, tuple) and len(sel_range) == 2:
         start_dt = pd.to_datetime(sel_range[0])
@@ -229,24 +222,30 @@ else:
 
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
+    with ctrl_col2:
+        st.download_button(
+            f"🗂️ 匯出 {len(display_df)} 筆",
+            build_cn_excel(display_df),
+            "cn_orders.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
     # 調整欄位順序：聯繫方式 在 IMO 前面，並將「警示」替換為「呼號」
     col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "呼號", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
-    st.caption(f"共 {len(display_df)} 筆資料")
-
     show_df = display_df.drop(columns=["原始內文"])
     styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
-    # 將樣式應用目標替換為 "呼號"
     styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
 
+    # --- 上半部：固定高度的 DataFrame ---
     event = st.dataframe(
         styled_df,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        height=550,
+        height=350,  # 固定高度 350px
         column_config={
             "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
@@ -258,24 +257,32 @@ else:
         }
     )
 
-    sel_rows = event.get("selection", {}).get("rows", [])
-    if sel_rows:
-        row = display_df.iloc[sel_rows[0]]
-        time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
-        st.markdown(f'''
-        <div class="email-pane">
-            <div class="email-subject">{row['主旨']}</div>
-            <div class="email-meta">
-                ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ 呼號: {row['呼號']}
+    # --- 下半部：固定高度的獨立捲動容器 ---
+    # 使用 st.container(height=...) 建立固定高度的獨立滾動區塊
+    detail_container = st.container(height=400, border=True)
+    
+    with detail_container:
+        sel_rows = event.get("selection", {}).get("rows", [])
+        if sel_rows:
+            row = display_df.iloc[sel_rows[0]]
+            time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
+            
+            # 如果呼號是 KYC，加上醒目提示
+            callsign_display = f"<span style='color:#A31D1D; font-weight:bold;'>{row['呼號']}</span>" if row['呼號'] == 'KYC' else row['呼號']
+            
+            st.markdown(f'''
+            <div class="email-pane">
+                <div class="email-subject">{row['主旨']}</div>
+                <div class="email-meta">
+                    ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ 呼號: {callsign_display}
+                </div>
+                <div class="email-body">{row["原始內文"]}</div>
             </div>
-            <div class="email-body">{row["原始內文"]}</div>
-        </div>
-        ''', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.download_button(
-        f"🗂️ 匯出 Excel ({len(display_df)} 筆)",
-        build_cn_excel(display_df),
-        "cn_orders.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+            ''', unsafe_allow_html=True)
+        else:
+            # 沒選取時的佔位提示
+            st.markdown("""
+                <div style="display: flex; justify-content: center; align-items: center; height: 100%; color: #888;">
+                    <h4>👆 請從上方列表中選擇一筆訂單，即可在此檢視郵件內容。</h4>
+                </div>
+            """, unsafe_allow_html=True)
