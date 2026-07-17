@@ -18,8 +18,11 @@ st.markdown("""
         .compact-title { font-size: 1.25rem; }
     }
     .email-pane {
-        background-color: transparent;
+        background-color: #ffffff; /* 確保郵件背景為白色 */
         color: #333333;
+        padding: 20px;
+        border-radius: 8px;
+        /* 移除外框與陰影，因為外層的 container 已經有 border=True 了 */
     }
     .email-subject { font-size: 1.2em; font-weight: bold; color: #202124; margin-bottom: 8px; }
     .email-meta { font-size: 0.95em; color: #5f6368; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eaeaea; }
@@ -238,14 +241,23 @@ else:
     styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
     styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
 
-    # --- 上半部：固定高度的 DataFrame ---
+    # --- 動態判斷表格高度 ---
+    # 透過 st.session_state 提前取得表格目前的選取狀態
+    table_key = "order_dataframe"
+    current_selection = st.session_state.get(table_key, {}).get("selection", {}).get("rows", [])
+    
+    # 如果有選取資料，表格高度為 350；如果未選取，表格高度展開為 750
+    df_height = 350 if len(current_selection) > 0 else 1000
+
+    # --- 渲染 DataFrame ---
     event = st.dataframe(
         styled_df,
+        key=table_key,  # 加入 key 以便讀取 session_state
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        height=350,  # 固定高度 350px
+        height=df_height,
         column_config={
             "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
@@ -257,13 +269,14 @@ else:
         }
     )
 
-    # --- 下半部：固定高度的獨立捲動容器 ---
-    # 使用 st.container(height=...) 建立固定高度的獨立滾動區塊
-    detail_container = st.container(height=400, border=True)
+    # --- 下半部：僅在有選取時才出現的固定高度獨立捲動容器 ---
+    sel_rows = event.get("selection", {}).get("rows", [])
     
-    with detail_container:
-        sel_rows = event.get("selection", {}).get("rows", [])
-        if sel_rows:
+    if sel_rows:
+        # 使用 st.container(height=...) 建立固定高度的獨立滾動區塊
+        detail_container = st.container(height=400, border=True)
+        
+        with detail_container:
             row = display_df.iloc[sel_rows[0]]
             time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
             
@@ -279,10 +292,3 @@ else:
                 <div class="email-body">{row["原始內文"]}</div>
             </div>
             ''', unsafe_allow_html=True)
-        else:
-            # 沒選取時的佔位提示
-            st.markdown("""
-                <div style="display: flex; justify-content: center; align-items: center; height: 100%; color: #888;">
-                    <h4>👆 請從上方列表中選擇一筆訂單，即可在此檢視郵件內容。</h4>
-                </div>
-            """, unsafe_allow_html=True)
