@@ -5,9 +5,12 @@ from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="訂單整理", page_icon="📦")
 
-# 初始化 Session State 來儲存「暫時刪除」的資料 UUID
+# 初始化 Session State
 if "deleted_uids" not in st.session_state:
     st.session_state["deleted_uids"] = set()
+# 新增一個 counter 用來強制刷新表格的 key，解決唯讀錯誤
+if "df_key_counter" not in st.session_state:
+    st.session_state["df_key_counter"] = 0
 
 st.markdown("""
     <style>
@@ -27,7 +30,14 @@ st.markdown("""
         padding: 20px;
         border-radius: 8px;
     }
-    .email-subject { font-size: 1.2em; font-weight: bold; color: #202124; margin-bottom: 8px; }
+    .email-subject { 
+        font-size: 1.2em; 
+        font-weight: bold; 
+        color: #202124; 
+        margin-bottom: 8px; 
+        /* 預留右邊距，避免長標題被浮動按鈕遮擋 */
+        padding-right: 90px; 
+    }
     .email-meta { font-size: 0.95em; color: #5f6368; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eaeaea; }
     .email-body {
         white-space: pre-wrap;
@@ -36,9 +46,19 @@ st.markdown("""
         line-height: 1.6;
         color: #444444;
     }
-    /* 讓刪除按鈕與標題排版更緊湊 */
-    .stButton>button {
-        margin-top: 15px;
+    
+    /* === 🚀 魔法區：利用錨點讓刪除按鈕懸浮 === */
+    /* 1. 隱藏用來當作定位錨點的隱形容器 */
+    div.element-container:has(#float-delete) {
+        display: none;
+    }
+    /* 2. 抓取錨點後方緊接著的元件 (即我們的刪除按鈕)，設為絕對定位 */
+    div.element-container:has(#float-delete) + div.element-container {
+        position: absolute;
+        right: 15px;
+        top: 15px;
+        width: auto;
+        z-index: 100;
     }
     </style>
     <div class="compact-title">📦 訂單整理</div>
@@ -251,7 +271,8 @@ else:
     styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
     styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
 
-    table_key = "order_dataframe"
+    # 動態產生 table_key，每次刪除後 counter + 1，確保表格徹底刷新並清空選取狀態
+    table_key = f"order_dataframe_{st.session_state['df_key_counter']}"
     current_selection = st.session_state.get(table_key, {}).get("selection", {}).get("rows", [])
     
     df_height = 350 if len(current_selection) > 0 else 1000
@@ -278,7 +299,6 @@ else:
     sel_rows = event.get("selection", {}).get("rows", [])
     
     if sel_rows:
-        # 如果使用者點擊刪除，會造成 sel_rows 取出的 index 超出範圍，需做防呆防護
         if sel_rows[0] < len(display_df):
             detail_container = st.container(height=400, border=True)
             
@@ -287,24 +307,23 @@ else:
                 time_str = row["日期"].strftime("%Y-%m-%d %H:%M") if pd.notnull(row["日期"]) else "未知時間"
                 callsign_display = f"<span style='color:#A31D1D; font-weight:bold;'>{row['呼號']}</span>" if row['呼號'] == 'KYC' else row['呼號']
                 
-                # 建立左右佈局：左邊放信件內容，右邊放刪除按鈕
-                text_col, btn_col = st.columns([10, 1])
-                
-                with btn_col:
-                    if st.button("🗑️ 刪除", help="暫時隱藏此筆訂單，匯出時亦會剔除"):
-                        st.session_state["deleted_uids"].add(row["_uid"])
-                        # 清空選取狀態避免報錯，並重新整理畫面收合郵件視窗
-                        if table_key in st.session_state:
-                            st.session_state[table_key]["selection"]["rows"] = []
-                        st.rerun()
+                # 1. 插入 HTML 錨點（不會被顯示，純作 CSS 定位器）
+                st.markdown('<div id="float-delete"></div>', unsafe_allow_html=True)
 
-                with text_col:
-                    st.markdown(f'''
-                    <div class="email-pane">
-                        <div class="email-subject">{row['主旨']}</div>
-                        <div class="email-meta">
-                            ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ 呼號: {callsign_display}
-                        </div>
-                        <div class="email-body">{row["原始內文"]}</div>
+                # 2. 插入按鈕（會被剛剛寫在頂部的 CSS 抓取，變成絕對定位漂浮在右上角）
+                if st.button("🗑️ 刪除", help="暫時隱藏此筆訂單，匯出時亦會剔除"):
+                    st.session_state["deleted_uids"].add(row["_uid"])
+                    # ★ 移除原本會導致報錯的程式碼，改用計數器刷新 Key 來重置選取狀態
+                    st.session_state["df_key_counter"] += 1
+                    st.rerun()
+
+                # 3. 滿版展開的郵件內容
+                st.markdown(f'''
+                <div class="email-pane">
+                    <div class="email-subject">{row['主旨']}</div>
+                    <div class="email-meta">
+                        ✉️ <b>{row['寄件者']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['放行狀態']} &nbsp; | &nbsp; ⚠️ 呼號: {callsign_display}
                     </div>
-                    ''', unsafe_allow_html=True)
+                    <div class="email-body">{row["原始內文"]}</div>
+                </div>
+                ''', unsafe_allow_html=True)
