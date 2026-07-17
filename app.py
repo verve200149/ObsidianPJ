@@ -347,7 +347,7 @@ if log:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("📁 總信件庫", f"{total_files} 封")
         col_m2.metric(f"📅 最新 ({latest_date_str})", f"{latest_emails} 封")
-        col_m3.metric("🚢 最新解析油輪", f"{total_targets} 筆")
+        col_m3.metric("🚢 最新解析郵件", f"{total_targets} 筆")
         col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
@@ -357,7 +357,9 @@ if not df.empty:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
     with c2:
-        sel_status = st.selectbox("📂 篩選狀態", ["全部", "APPROVED", "COMPLETED", "CANCELLED", "PENDING", "KYC未通過"])
+         # 從資料中撈取所有不重複的狀態，排序後加上「全部」
+         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
+         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
     with c3:
         valid_dates = df["日期"].dropna()
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
@@ -375,7 +377,7 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    st.info("💡 點擊左側表格內的任意郵件（最多顯示 2 筆預覽），即可在右側分割預覽完整內容，中間可拖曳調整寬度。")
+    st.info("💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。")
 
     # === 版面結構：完全沒選取 -> 用單一 container（清單滿版，無閃爍）
     #     一旦有選取 -> 固定用「3 欄」結構，之後在 1 筆/2 筆之間切換都共用同一組 DOM，
