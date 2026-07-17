@@ -128,14 +128,14 @@ else:
         export_df = export_df[is_not_empty]
         
         json_data = export_df.to_dict(orient="records")
-      st.download_button(
-        label="📧",  # 換成帶有藍綠/青色調的電子郵件圖示
+        st.download_button(
+        label="📩", 
         data=json.dumps(json_data, ensure_ascii=False, indent=4).encode("utf-8-sig"),
         file_name="Kingdee_Export_UTF8.json",
         mime="application/json",
         use_container_width=True,
-        help="匯出全部資料 (Kingdee_Export_UTF8.json)"
-       )
+        help="匯出全部資料 (存檔為 Kingdee_Export_UTF8.json)"
+    )
 
     # ==========================================
     # 3. 處理邏輯與高亮特效
