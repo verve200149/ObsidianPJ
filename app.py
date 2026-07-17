@@ -146,9 +146,13 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 def load_all_data():
     rows = []
     parse_errors = []
+    DATA_DIR = 'data_John'
+    # 如果資料夾還不存在，直接回傳空資料
+    if not os.path.exists(DATA_DIR):
+        return pd.DataFrame(rows), parse_errors
     # 這些檔案是本機端使用的說明/操作文件，不是郵件資料，網頁端一律跳過不掃描
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
-    for root, _, files in os.walk('.'):
+    for root, _, files in os.walk(DATA_DIR):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
         for file in files:
             if not (file.endswith('.md') and file not in EXCLUDE_FILES):
