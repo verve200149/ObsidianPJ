@@ -442,32 +442,28 @@ if not df.empty:
         # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-    # 2. 定義狀態背景顏色的 CSS 映射表（透明度 70%）
+        # 2a. 狀態顏色邏輯
         def style_status(val):
             val_upper = str(val).upper().strip()
-            # APPROVED: RGB(250, 225, 50) -> rgba(250, 225, 50, 0.7)
-            if "APPROVED" in val_upper: 
-                return "background-color: rgba(250, 225, 50, 0.7); color: #333300; font-weight: bold;" 
-            
-            # COMPLETED: RGB(255, 128, 128) -> rgba(255, 128, 128, 0.7)
-            elif "COMPLETED" in val_upper: 
-                return "background-color: rgba(255, 128, 128, 0.7); color: #4a1c1c; font-weight: bold;" 
-            
-            # CANCELLED: RGB(230, 120, 230) -> rgba(230, 120, 230, 0.7)
-            elif "CANCELLED" in val_upper: 
-                return "background-color: rgba(230, 120, 230, 0.7); color: #4a1c4a; font-weight: bold;" 
-            
-            # KYC未通過 (紅色系) -> rgba(248, 215, 218, 0.7)
-            elif "KYC" in val_upper: 
-                return "background-color: rgba(248, 215, 218, 0.7); color: #842029; font-weight: bold;"
-            
-            # PENDING: 黃色系 -> rgba(255, 243, 205, 0.7)
-            elif "PENDING" in val_upper: 
-                return "background-color: rgba(255, 243, 205, 0.7); color: #664D03; font-weight: bold;" 
-            
-            return "" # 其他不變
+            if "APPROVED" in val_upper: return "background-color: rgba(250, 225, 50, 0.7); color: #333300; font-weight: bold;"
+            elif "COMPLETED" in val_upper: return "background-color: rgba(255, 128, 128, 0.7); color: #4a1c1c; font-weight: bold;"
+            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.7); color: #4a1c4a; font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.7); color: #664D03; font-weight: bold;"
+            return ""
 
+        # 2b. 判斷並標示重複 IMO 的邏輯
+        # 找出「油輪 + IMO」組合重複的項目 (keep=False 代表全部標記為 True)，並排除 IMO 為空白或 "-" 的情況
+        dup_mask = display_df.duplicated(subset=['油輪', 'IMO'], keep=False) & (~display_df['IMO'].isin(['-', '', '(本次無資料)']))
+        dup_indices = display_df[dup_mask].index
+
+        def style_duplicate_imo(s):
+            # s 是一個 Series (這裡會傳入 IMO 欄位)，檢查該索引是否在 dup_indices 中
+            # 如果是，就塗上橘色半透明背景來提示有「多筆狀態」
+            return ['background-color: rgba(253, 126, 20, 0.4); font-weight: bold; color: #8A5A44;' if i in dup_indices else '' for i in s.index]
+
+        # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
+        styled_df = styled_df.apply(style_duplicate_imo, subset=["IMO"]) # 👈 在這疊加上去！
         
         event = st.dataframe(
             styled_df,  
@@ -478,7 +474,7 @@ if not df.empty:
             key=DF_KEY,
             height=500,
             column_config={
-                # 3. 前端動態改名：把原名為 "日期" 的欄位，在畫面上顯示成 "收信時間"！
+                # 前端動態改名：把原名為 "日期" 的欄位，在畫面上顯示成 "收信時間"
                 "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
                 "狀態": st.column_config.TextColumn("狀態", width="small"),
                 "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
