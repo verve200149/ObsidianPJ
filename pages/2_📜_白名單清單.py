@@ -122,14 +122,14 @@ else:
             st.session_state["whitelist_df"] = pd.concat([new_df, st.session_state["whitelist_df"]], ignore_index=True)
             st.rerun()
 
-    with col_export:
-        export_df = st.session_state["whitelist_df"].copy()
-        is_not_empty = export_df.astype(str).apply(lambda x: x.str.strip().astype(bool)).any(axis=1)
-        export_df = export_df[is_not_empty]
-        
-        json_data = export_df.to_dict(orient="records")
-        st.download_button(
-        label="📩", 
+   with col_export:
+    export_df = st.session_state["whitelist_df"].copy()
+    is_not_empty = export_df.astype(str).apply(lambda x: x.str.strip().astype(bool)).any(axis=1)
+    export_df = export_df[is_not_empty]
+    
+    json_data = export_df.to_dict(orient="records")
+    st.download_button(
+        label="📧", 
         data=json.dumps(json_data, ensure_ascii=False, indent=4).encode("utf-8-sig"),
         file_name="Kingdee_Export_UTF8.json",
         mime="application/json",
