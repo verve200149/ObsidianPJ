@@ -1,1 +1,8 @@
+# 1. 忽略那些會自動生成的系統垃圾檔案
+.DS_Store
+.ipynb_checkpoints/
+
+# 2. 強制 Git 只去管理你的 Data 和 JSON
+# 其他所有的 .py, .toml, .md, .txt 等檔案，Git 只會在有變更時「上傳」，
+# 但它「絕對不會」因為你本機端沒有這些檔案就去刪除 GitHub 上的庫存。git_config.txt
 git_config.txt
