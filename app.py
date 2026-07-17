@@ -7,7 +7,7 @@ from datetime import datetime
 # 建議將網頁預設為寬螢幕佈局
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
-# 自定義 CSS (打造清爽的郵箱風格 UI)
+# 自定義 CSS (打造清爽的郵箱風格 UI + 手機版篩選器強制同行優化)
 st.markdown("""
     <style>
     /* 調整指標數字大小與顏色 (商務藍) */
@@ -50,6 +50,28 @@ st.markdown("""
         font-size: 14px;
         line-height: 1.6;
         color: #444444;
+    }
+
+    /* 手機版篩選器元件內縮與緊湊化，防止同行時內容爆出去 */
+    @media (max-width: 640px) {
+        div[id="mobile-filter-container"] label {
+            font-size: 0.75rem !important; /* 縮小上方標題如 「🚢 篩選油輪」 */
+        }
+        div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {
+            font-size: 0.75rem !important;
+        }
+        div[id="mobile-filter-container"] div[data-baseweb="select"] {
+            font-size: 0.75rem !important; /* 縮小下拉選單內文字 */
+        }
+        div[id="mobile-filter-container"] input {
+            font-size: 0.7rem !important;  /* 縮小日期輸入框文字 */
+            padding: 2px 4px !important;
+        }
+        /* 讓下拉選單與日期高度更緊湊 */
+        div[id="mobile-filter-container"] div[data-baseweb="base-input"] {
+            min-height: 30px !important;
+            height: 30px !important;
+        }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -201,8 +223,7 @@ def load_all_data():
                 continue
     return pd.DataFrame(rows), parse_errors
 
-# --- 4. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示，
-#         避免每次選取都造成整頁重新排版、瞬間跳動的問題) ---
+# --- 4. 分割版面 (固定 3 欄結構，永遠不改變 DOM 結構，只用 JS 調整寬度/顯示) ---
 def apply_split_layout(marker_id: str, n_selected: int):
     js = f"""
     <script>
@@ -211,14 +232,11 @@ def apply_split_layout(marker_id: str, n_selected: int):
             const allBlocks = Array.from(doc.querySelectorAll('[data-testid="stHorizontalBlock"]'));
             for (const b of allBlocks) {{
                 if (marker.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) return b;
-            }}
+            }
             return null;
         }}
 
         function setupHandle(doc, hBlock, id, left, right) {{
-            // 每次都重新建立，不沿用舊的節點：
-            // components.html 每次執行都是全新的 iframe realm，若沿用舊節點，
-            // 其監聽器可能綁在已經失效的舊 realm 上，導致「看起來還在但拖不動」。
             const old = hBlock.querySelector('#' + id);
             if (old) old.remove();
             const h = doc.createElement('div');
@@ -303,39 +321,47 @@ def apply_split_layout(marker_id: str, n_selected: int):
     """
     components.html(js, height=0, width=0)
 
+# --- 5. 強制手機版篩選器維持同一行不拆行 (全域定義) ---
+def apply_mobile_filter_layout():
+    js = """
+    <script>
+    (function() {
+        let attempts = 0;
+        function fixFilter() {
+            attempts++;
+            const doc = window.parent.document;
+            const container = doc.getElementById('mobile-filter-container');
+            if (!container) {
+                if (attempts < 30) setTimeout(fixFilter, 80);
+                return;
+            }
+            
+            // 找到 Streamlit 原生的 Columns 橫向區塊
+            const hBlock = container.querySelector('[data-testid="stHorizontalBlock"]');
+            if (!hBlock) return;
+            
+            // 1. 強制 Flex 佈局不換行
+            hBlock.style.setProperty('display', 'flex', 'important');
+            hBlock.style.setProperty('flex-direction', 'row', 'important');
+            hBlock.style.setProperty('flex-wrap', 'nowrap', 'important');
+            hBlock.style.setProperty('gap', '8px', 'important');
+            
+            // 2. 強制子欄位等寬平分 (4:4:4)
+            const cols = Array.from(hBlock.children).filter(c => c.getAttribute && c.getAttribute('data-testid') === 'stColumn');
+            cols.forEach(col => {
+                col.style.setProperty('flex', '1 1 0%', 'important');
+                col.style.setProperty('min-width', '0', 'important');
+                col.style.setProperty('width', 'auto', 'important'); // 移除 Streamlit 原生 100% 寬度限制
+            });
+        }
+        setTimeout(fixFilter, 50);
+    })();
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
 # --- 介面渲染 ---
 st.markdown("""
-    <style>
-    /* 精簡標題：預設一行，手機窄螢幕時再縮小字體/留白，避免佔用過多版面 */
-    .compact-title {
-        font-size: 1.8rem;
-        font-weight: 700;
-        margin: 0 0 0.4rem 0;
-        line-height: 1.2;
-        white-space: nowrap;
-    }
-  /* 手機版篩選器元件內縮與緊湊化，防止同行時內容爆出去 */
-@media (max-width: 640px) {
-    div[id="mobile-filter-container"] label {
-        font-size: 0.75rem !important; /* 縮小上方標題如 「🚢 篩選油輪」 */
-    }
-    div[id="mobile-filter-container"] div[data-testid="stMarkdownContainer"] p {
-        font-size: 0.75rem !important;
-    }
-    div[id="mobile-filter-container"] div[data-baseweb="select"] {
-        font-size: 0.75rem !important; /* 縮小下拉選單內文字 */
-    }
-    div[id="mobile-filter-container"] input {
-        font-size: 0.7rem !important;  /* 縮小日期輸入框文字 */
-        padding: 2px 4px !important;
-    }
-    /* 讓下拉選單與日期高度更緊湊 */
-    div[id="mobile-filter-container"] div[data-baseweb="base-input"] {
-        min-height: 30px !important;
-        height: 30px !important;
-    }
-}
-    </style>
     <div class="compact-title">🚢 船隊實時調度報表</div>
     """, unsafe_allow_html=True)
 
@@ -348,7 +374,7 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
-# 數據看板 (Metrics)：預設收合，手機上只佔一行標題，需要時再點開查看
+# 數據看板 (Metrics)：預設收合
 log = load_update_log()
 if log:
     update_time = log.get('update_time', '未知')
@@ -370,15 +396,16 @@ if log:
 if not df.empty:
     # 1. 用 HTML 標記一個篩選器專用的 Container ID，方便 CSS 精準定位
     st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
-    # 將比例改為 1:1:1 (等同於你要求的 4:4:4 平分比例)
+    
+    # 將比例改為 1:1:1 (平分比例)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
     with c2:
-         # 從資料中撈取所有不重複的狀態，排序後加上「全部」
-         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
-         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
+        # 從資料中撈取所有不重複的狀態，排序後加上「全部」
+        dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
+        sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
     with c3:
         valid_dates = df["日期"].dropna()
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
@@ -386,7 +413,7 @@ if not df.empty:
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
     st.markdown('</div>', unsafe_allow_html=True) # 結束容器
 
-    # 💥 【在此處呼叫】讓瀏覽器強制重寫 CSS 結構，實現絕對同行
+    # 💥 強制瀏覽器覆寫 CSS 結構，實現手機版不換行
     apply_mobile_filter_layout()
 
     # 資料過濾邏輯
@@ -402,15 +429,9 @@ if not df.empty:
 
     st.info("💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。")
 
-    # === 版面結構：完全沒選取 -> 用單一 container（清單滿版，無閃爍）
-    #     一旦有選取 -> 固定用「3 欄」結構，之後在 1 筆/2 筆之間切換都共用同一組 DOM，
-    #     不會再重新掛載，避免了選取數量變化時的整頁重排問題。
+    # === 版面結構 ===
     DF_KEY = "email_table"
 
-    # 用「序號」記錄每一筆被勾選的先後順序 (row_idx -> 序號)。
-    # 注意：新版 Streamlit 的 st.session_state[DF_KEY]["selection"] 是唯讀的，
-    # 沒辦法用程式強制取消使用者勾選的 checkbox，所以這裡只用序號來決定
-    # 「預覽區要顯示哪 2 筆」，checkbox 本身的勾選狀態完全交給使用者自行控制。
     if "sel_seq" not in st.session_state:
         st.session_state.sel_seq = {}   # {row_idx: 序號}
     if "sel_counter" not in st.session_state:
@@ -461,16 +482,14 @@ if not df.empty:
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-    # === 用這一輪「真正最新」的選取結果，更新序號並算出要預覽的 2 筆 ===
+    # === 更新序號並計算預覽項目 ===
     raw_rows = event.get("selection", {}).get("rows", [])
     raw_set = set(raw_rows)
 
-    # 已取消勾選的，移除其序號
     for r in list(st.session_state.sel_seq.keys()):
         if r not in raw_set:
             del st.session_state.sel_seq[r]
 
-    # 新勾選的，給一個新序號 (代表最新選取)
     for r in raw_rows:
         if r not in st.session_state.sel_seq:
             st.session_state.sel_counter += 1
@@ -487,7 +506,6 @@ if not df.empty:
         )
 
     if marker_id:
-        # 這個分支下 1 筆/2 筆共用同一組 3 欄結構，用 JS 直接套用寬度即可，不需要重跑
         apply_split_layout(marker_id, n_selected)
 
     def render_email_pane(container, row):
@@ -509,46 +527,5 @@ if not df.empty:
         if i < len(preview_cols) and row_idx < len(display_df):
             render_email_pane(preview_cols[i], display_df.iloc[row_idx])
 
-    # 只有在「完全沒選 <-> 有選取」這個結構性邊界猜錯時才需要重跑校正一次；
-    # 在「選 1 筆 <-> 選 2 筆」之間切換完全不會走到這裡。
     if (n_selected == 0) != (not guess_has_selection):
         st.rerun()
-
-   # --- 5. 強制手機版篩選器維持同一行不拆行 ---
-   def apply_mobile_filter_layout():
-    js = """
-    <script>
-    (function() {
-        let attempts = 0;
-        function fixFilter() {
-            attempts++;
-            const doc = window.parent.document;
-            const container = doc.getElementById('mobile-filter-container');
-            if (!container) {
-                if (attempts < 30) setTimeout(fixFilter, 80);
-                return;
-            }
-            
-            // 找到 Streamlit 原生的 Columns 橫向區塊
-            const hBlock = container.querySelector('[data-testid="stHorizontalBlock"]');
-            if (!hBlock) return;
-            
-            // 1. 強制 Flex 佈局不換行
-            hBlock.style.setProperty('display', 'flex', 'important');
-            hBlock.style.setProperty('flex-direction', 'row', 'important');
-            hBlock.style.setProperty('flex-wrap', 'nowrap', 'important');
-            hBlock.style.setProperty('gap', '8px', 'important');
-            
-            // 2. 強制子欄位等寬平分 (4:4:4)
-            const cols = Array.from(hBlock.children).filter(c => c.getAttribute && c.getAttribute('data-testid') === 'stColumn');
-            cols.forEach(col => {
-                col.style.setProperty('flex', '1 1 0%', 'important');
-                col.style.setProperty('min-width', '0', 'important');
-                col.style.setProperty('width', 'auto', 'important'); // 幹掉 Streamlit 的 width: 100%
-            });
-        }
-        setTimeout(fixFilter, 50);
-    })();
-    </script>
-    """
-    components.html(js, height=0, width=0)
