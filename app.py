@@ -160,7 +160,7 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
 
         if not tankers:
             # 沒有任何資料時，至少寫一個空白分頁，避免 Excel 檔案無法開啟
-            pd.().to_excel(writer, sheet_name="無資料", index=False)
+            pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
 
     return output.getvalue()
 
