@@ -459,7 +459,7 @@ if not df.empty:
         def style_duplicate_imo(s):
             # s 是一個 Series (這裡會傳入 IMO 欄位)，檢查該索引是否在 dup_indices 中
             # 如果是，就塗上橘色半透明背景來提示有「多筆狀態」
-            return ['background-color: rgba(253, 126, 20, 0.4); font-weight: bold; color: #8A5A44;' if i in dup_indices else '' for i in s.index]
+            return ['background-color: rgba(253, 126, 20, 0.5); font-weight: bold;' if i in dup_indices else '' for i in s.index]
 
         # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
