@@ -9,7 +9,7 @@ st.markdown("""
     <style>
     .compact-title {
         font-size: 1.8rem;
-        font-weight: 700;
+        font-weight: 800;
         margin: 0 0 0.4rem 0;
         line-height: 1.2;
         white-space: nowrap;
@@ -259,11 +259,11 @@ else:
         selection_mode="single-row",
         height=df_height,
         column_config={
-            "日期": st.column_config.DatetimeColumn("時間", format="YYYY/MM/DD HH:mm"),
+            "日期": st.column_config.DatetimeColumn("接收時間", format="MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
             "數量": st.column_config.TextColumn("數量", width="small"),
             "IMO": st.column_config.TextColumn("IMO", width="small"),
-            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="large"),
+            "聯繫方式": st.column_config.TextColumn("聯繫方式", width="medium"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
             "呼號": st.column_config.TextColumn("呼號", width="small"),
         }
