@@ -445,10 +445,10 @@ if not df.empty:
         # 2a. 狀態顏色邏輯
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "APPROVED" in val_upper: return "background-color: rgba(250, 225, 50, 0.7); color: #333300; font-weight: bold;"
-            elif "COMPLETED" in val_upper: return "background-color: rgba(255, 128, 128, 0.7); color: #4a1c1c; font-weight: bold;"
-            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.7); color: #4a1c4a; font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.7); color: #664D03; font-weight: bold;"
+            if "APPROVED" in val_upper: return "background-color: rgba(250, 225, 50, 0.3); color: #333300; font-weight: bold;"
+            elif "COMPLETED" in val_upper: return "background-color: rgba(255, 128, 128, 0.3); color: #4a1c1c; font-weight: bold;"
+            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3); color: #4a1c4a; font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.3); color: #664D03; font-weight: bold;"
             return ""
 
 # 2b. 判斷並標示「有效配對」的 IMO 邏輯
