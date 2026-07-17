@@ -442,55 +442,43 @@ if not df.empty:
         # 1. 指定顯示順序 (注意：請填寫 Pandas 內部的原始欄位名稱)
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-      # 2a. 狀態顏色邏輯 (背景 30% 不透明度，字體加粗、不變淡且縮小至 12px)
+# 2a. 狀態顏色邏輯 (只設定 30% 背景色，文字完全使用預設色、不加粗、文字縮小至 11px)
         def style_status(val):
             val_upper = str(val).upper().strip()
-            # font-size: 12px 讓字體變小，同時維持原本的高對比度文字顏色
+            # 💡 拿掉 color 與 font-weight，只留背景色與縮小字體
             if "APPROVED" in val_upper: 
-                return "background-color: rgba(250, 225, 50, 0.3); color: #554400; font-weight: bold; font-size: 10px;"
+                return "background-color: rgba(250, 225, 50, 0.3); font-size: 11px;"
             elif "COMPLETED" in val_upper: 
-                return "background-color: rgba(255, 128, 128, 0.3); color: #801a1a; font-weight: bold; font-size: 10px;"
+                return "background-color: rgba(255, 128, 128, 0.3); font-size: 11px;"
             elif "CANCELLED" in val_upper or "KYC" in val_upper: 
-                return "background-color: rgba(230, 120, 230, 0.3); color: #661166; font-weight: bold; font-size: 10px;"
+                return "background-color: rgba(230, 120, 230, 0.3); font-size: 11px;"
             elif "PENDING" in val_upper: 
-                return "background-color: rgba(255, 243, 205, 0.3); color: #664D03; font-weight: bold; font-size: 10px;"
+                return "background-color: rgba(255, 243, 205, 0.3); font-size: 11px;"
             return ""
 
-# 2b. 判斷並標示「有效配對」的 IMO 邏輯
-        # 條件：同一油輪、同一IMO，存在「APPROVED」與「COMPLETED」，且 COMPLETED 晚於 APPROVED 並在 7 天內
         valid_dup_indices = set()
-        
-        # 排除無效 IMO 的資料來提升比對效率
         valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
         valid_df = display_df[valid_imo_mask]
         
-        # 依照 油輪 與 IMO 分組進行檢查
         for (tanker, imo), group in valid_df.groupby(['油輪', 'IMO']):
-            # 抓出該群組內的 APPROVED 與 COMPLETED 紀錄
             approved_rows = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
             completed_rows = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
             
-            # 只有當兩者都存在時，才進一步比對時間
             if not approved_rows.empty and not completed_rows.empty:
                 for a_idx, a_row in approved_rows.iterrows():
                     for c_idx, c_row in completed_rows.iterrows():
                         a_time = a_row['日期']
                         c_time = c_row['日期']
                         
-                        # 確保時間欄位不是空值
                         if pd.notnull(a_time) and pd.notnull(c_time):
                             time_diff = c_time - a_time
-                            
-                            # 判斷邏輯：COMPLETED 時間 > APPROVED 時間，且相差 <= 7 天
                             if pd.Timedelta(0) < time_diff <= pd.Timedelta(days=7):
-                                # 條件符合，將這兩個紀錄的 Index 加入發光名單
                                 valid_dup_indices.add(a_idx)
                                 valid_dup_indices.add(c_idx)
 
         def style_duplicate_imo(s):
-            # 針對被標記為有效配對的 IMO 欄位，套用橘色半透明背景 (50%) 與粗體
-            return ['background-color: rgba(253, 126, 20, 0.1); font-weight: bold;' if i in valid_dup_indices else '' for i in s.index]
-
+            return ['background-color: rgba(253, 126, 20, 0.2); font-weight: bold;' if i in valid_dup_indices else '' for i in s.index]
+            
         # 3. 疊加套用樣式：先上狀態顏色，再針對 IMO 欄位上重複顏色
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
         styled_df = styled_df.apply(style_duplicate_imo, subset=["IMO"]) # 👈 在這疊加上去！
