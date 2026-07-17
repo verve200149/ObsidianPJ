@@ -74,6 +74,8 @@ st.markdown("""
             height: 30px !important;
         }
     }
+    /* 全站區塊間距收緊，畫面更緊湊 */
+    div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -344,6 +346,59 @@ def apply_mobile_filter_layout():
     """
     components.html(js, height=0, width=0)
 
+# --- 6. 滾動時自動收折的提示框 (用瀏覽器 sessionStorage 記住「已收折」狀態，
+#         只有真正重新整理網頁才會恢復顯示，Streamlit 互動重跑不會讓它再跳出來) ---
+def apply_scroll_dismiss_tip(tip_id: str):
+    js = f"""
+    <script>
+    (function() {{
+        let attempts = 0;
+        function init() {{
+            attempts++;
+            const doc = window.parent.document;
+            const win = window.parent;
+            const tip = doc.getElementById('{tip_id}');
+            if (!tip) {{ if (attempts < 30) setTimeout(init, 80); return; }}
+            if (tip.dataset.scrollInit === '1') return;
+            tip.dataset.scrollInit = '1';
+
+            const dismissedKey = 'fleet_tip_dismissed';
+
+            function hideTip() {{
+                tip.style.maxHeight = '0px';
+                tip.style.opacity = '0';
+                tip.style.marginTop = '0';
+                tip.style.marginBottom = '0';
+                tip.style.paddingTop = '0';
+                tip.style.paddingBottom = '0';
+                tip.style.borderWidth = '0';
+            }}
+
+            try {{
+                if (win.sessionStorage.getItem(dismissedKey) === '1') {{
+                    hideTip();
+                    return;
+                }}
+            }} catch (e) {{}}
+
+            let dismissed = false;
+            function onScroll() {{
+                if (dismissed) return;
+                if (win.scrollY > 40) {{
+                    dismissed = true;
+                    hideTip();
+                    try {{ win.sessionStorage.setItem(dismissedKey, '1'); }} catch (e) {{}}
+                    win.removeEventListener('scroll', onScroll);
+                }}
+            }}
+            win.addEventListener('scroll', onScroll, {{ passive: true }});
+        }}
+        setTimeout(init, 100);
+    }})();
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
 # --- 介面渲染 ---
 st.markdown("""
     <div class="compact-title">🚢 船隊實時調度報表</div>
@@ -406,7 +461,16 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    st.info("💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。")
+    st.markdown('''
+    <div id="scroll-tip" style="
+        background-color:#1a3a5c;border:1px solid #2c5a8a;border-radius:6px;
+        padding:8px 14px;margin:2px 0 6px 0;color:#8ab4f8;font-size:0.85rem;
+        max-height:60px;overflow:hidden;
+        transition:opacity 0.25s ease, max-height 0.25s ease, margin 0.25s ease, padding 0.25s ease;">
+        💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。
+    </div>
+    ''', unsafe_allow_html=True)
+    apply_scroll_dismiss_tip("scroll-tip")
 
     DF_KEY = "email_table"
     if "sel_seq" not in st.session_state:
