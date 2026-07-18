@@ -258,14 +258,16 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                                 if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
                                     paired_indices.add(a_idx)
                                     paired_indices.add(c_idx)
+        
 
-        active_vdf = vdf.drop(index=list(paired_indices))
+        active_vdf["日期"] = pd.to_datetime(active_vdf["日期"], errors='coerce')
+        valid_date_vdf = active_vdf.dropna(subset=["日期"])
         
-        # 近五天資料篩選
         cutoff = datetime.now(TAIPEI_TZ) - pd.Timedelta(days=5)
-        recent_active = active_vdf[active_vdf["日期"] >= cutoff].copy()
+        # 使用過濾後的 valid_date_vdf 進行比較，避免 TypeError
+        recent_active = valid_date_vdf[valid_date_vdf["日期"] >= cutoff].copy()
         
-        # 準備加油計算 (IMO 去重)
+        # 準備加油：排除無效 IMO，去重後的 APPROVED 數量
         ready_count = 0
         if not recent_active.empty and 'IMO' in recent_active.columns:
             ready_df = recent_active[
@@ -274,9 +276,10 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             ]
             ready_count = int(ready_df['IMO'].nunique())
 
-        # 清單計算 (IMO 去重)
+        # 近期清單：IMO 去重 (保留最新一筆)，最多 10 筆
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
+            # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
             recent_active['temp_id'] = recent_active['IMO'].replace('-', None).fillna(recent_active.index.to_series())
             recent_orders = recent_active.drop_duplicates(subset=['temp_id'], keep='first').head(10)[["日期", "狀態", "船名"]].to_dict("records")
         else:
