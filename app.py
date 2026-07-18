@@ -248,15 +248,18 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
         active_vdf = vdf.drop(index=list(paired_indices))
 
-        # 「準備加油」：排除結案後，仍在 active_vdf 中的 APPROVED 訂單
-        ready_count = int(active_vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
+        # 「準備加油」：排除結案後，並且 IMO 必須為有效值，才算入準備加油數量
+        active_valid_imo_df = active_vdf[~active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+        ready_count = int(active_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False).sum())
 
-        # 抓「最新一筆的日期」往前推 2 天內的『未結案』紀錄給清單
+        # 抓「最新一筆的日期」往前推 5 天內的『未結案』紀錄給清單
         recent_sorted = active_vdf.sort_values("日期", ascending=False)
         if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
-            cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=2)
+            cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=5)
             recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
-        recent_orders = recent_sorted[["狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
+            
+        # 限制最多不超過 10 筆，並保留日期供 Popup 顯示
+        recent_orders = recent_sorted.head(10)[["日期", "狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
 
         row = v.to_dict()
         row.update({
@@ -389,20 +392,22 @@ def _status_emoji(status):
 
 
 def _build_recent_orders_html(recent_orders, vessel_name):
-    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示"""
+    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示，最多帶入 10 筆"""
     if not recent_orders:
         return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
 
     def _item(o):
         status = o.get("狀態", "-") or "-"
         ship = o.get("船名", "-") or "-"
+        dt = o.get("日期", pd.NaT)
+        dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else ""
+        dt_html = f"<span style='color:#888; font-size:11px;'>({dt_str})</span>" if dt_str else ""
         return (
-            f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0;">'
-            f'{_status_emoji(status)} <b>{status}</b> ・ {ship}</div>'
+            f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0; font-size:12px;">'
+            f'{_status_emoji(status)} <b>{status}</b> {dt_html} ・ {ship}</div>'
         )
 
-    MAX_TOTAL = 30  
-    items = [_item(o) for o in recent_orders[:MAX_TOTAL]]
+    items = [_item(o) for o in recent_orders]
     html = '<div style="margin-top:4px;">' + "".join(items[:3])
 
     if len(items) > 3:
@@ -414,7 +419,7 @@ def _build_recent_orders_html(recent_orders, vessel_name):
             f'<div id="extra_{safe_id}" style="display:none;">{rest_html}</div>'
             f'<div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" '
             f'onclick="document.getElementById(\'extra_{safe_id}\').style.display=\'block\'; this.style.display=\'none\';">'
-            f'▼ 顯示更多未結案訂單（共 {len(recent_orders)} 筆）</div>'
+            f'▼ 顯示更多近五天訂單（共 {len(recent_orders)} 筆）</div>'
         )
 
     html += "</div>"
@@ -461,7 +466,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         
         recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
-        # 更新 Popup：移除待審，加入「準備加油」與「已完成」
+        # 更新 Popup：加入「準備加油」與「已完成」
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
