@@ -6,6 +6,8 @@ from datetime import datetime, timezone, timedelta
 
 import folium
 from folium.plugins import MarkerCluster
+from folium.elements import MacroElement
+from jinja2 import Template
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -247,53 +249,111 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 
 
-def _format_lon_tick(map_lon):
-    """把 0~360 的內部座標換算回一般人看得懂的東經/西經標示"""
-    real = map_lon - 360 if map_lon > 180 else map_lon
-    if real == 0:
-        return "0°"
-    if abs(real) == 180:
-        return "180°"
-    return f"{abs(real):.0f}°{'E' if real > 0 else 'W'}"
-
-
-def _format_lat_tick(lat):
-    if lat == 0:
-        return "0°"
-    return f"{abs(lat):.0f}°{'N' if lat > 0 else 'S'}"
-
-
-def _add_tick_label(m, lat, lon, text):
+class EdgeTickOverlay(MacroElement):
     """
-    純 Folium 內建 DivIcon 標記文字，不依賴任何外部 CDN／JS 套件，
-    在 streamlit-folium 的 iframe 環境下最穩定不會失效。
+    在地圖容器的四個邊緣顯示動態經緯度刻度，跟著 moveend / zoomend
+    即時重新計算像素位置，效果類似固定在畫面邊框的座標軸。
+
+    完全是內嵌的自寫 JS，不載入任何外部 CDN／套件，
+    所以不會有外部資源在 streamlit-folium 的 iframe 環境下載入失敗的問題。
     """
-    html = (
-        '<div style="font-size:10px; color:#546e7a; font-weight:bold; '
-        'background:rgba(255,255,255,0.8); padding:1px 4px; border-radius:2px; '
-        'white-space:nowrap; pointer-events:none;">' + text + '</div>'
-    )
-    folium.Marker(
-        location=[lat, lon],
-        icon=folium.DivIcon(html=html, icon_size=(0, 0), icon_anchor=(0, 0)),
-    ).add_to(m)
+    def __init__(self):
+        super().__init__()
+        self._template = Template("""
+        {% macro script(this, kwargs) %}
+        (function() {
+            var map = {{ this._parent.get_name() }};
+            var container = map.getContainer();
 
+            var overlay = document.createElement('div');
+            overlay.style.position = 'absolute';
+            overlay.style.top = '0';
+            overlay.style.left = '0';
+            overlay.style.width = '100%';
+            overlay.style.height = '100%';
+            overlay.style.pointerEvents = 'none';
+            overlay.style.zIndex = '650';
+            container.appendChild(overlay);
 
-def _add_edge_ticks(m):
-    """在網格線的四個邊緣貼上經緯度刻度文字"""
-    LAT_EDGE, LON_MIN, LON_MAX = 80, 0, 360
+            var NICE_STEPS = [1, 2, 5, 10, 15, 30, 45, 60, 90];
+            function niceStep(span, targetCount) {
+                var raw = span / targetCount;
+                for (var i = 0; i < NICE_STEPS.length; i++) {
+                    if (NICE_STEPS[i] >= raw) return NICE_STEPS[i];
+                }
+                return 90;
+            }
 
-    # 左右兩側：緯度刻度
-    for lat_line in range(-75, 76, 15):
-        label = _format_lat_tick(lat_line)
-        _add_tick_label(m, lat_line, LON_MIN + 1, label)
-        _add_tick_label(m, lat_line, LON_MAX - 1, label)
+            function fmtLon(lon) {
+                var l = ((lon % 360) + 540) % 360 - 180; // 正規化到 -180~180
+                l = Math.round(l);
+                if (l === 0) return '0°';
+                if (Math.abs(l) === 180) return '180°';
+                return Math.abs(l) + (l > 0 ? '°E' : '°W');
+            }
+            function fmtLat(lat) {
+                lat = Math.round(lat);
+                if (lat === 0) return '0°';
+                return Math.abs(lat) + (lat > 0 ? '°N' : '°S');
+            }
 
-    # 上下兩側：經度刻度
-    for lon_line in range(0, 361, 30):
-        label = _format_lon_tick(lon_line)
-        _add_tick_label(m, LAT_EDGE - 1, lon_line, label)
-        _add_tick_label(m, -LAT_EDGE + 1, lon_line, label)
+            function addLabel(text, x, y, transform) {
+                var el = document.createElement('div');
+                el.textContent = text;
+                el.style.position = 'absolute';
+                el.style.fontSize = '10px';
+                el.style.fontWeight = 'bold';
+                el.style.color = '#546e7a';
+                el.style.background = 'rgba(255,255,255,0.85)';
+                el.style.padding = '1px 3px';
+                el.style.borderRadius = '2px';
+                el.style.whiteSpace = 'nowrap';
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+                el.style.transform = transform;
+                overlay.appendChild(el);
+            }
+
+            function redraw() {
+                overlay.innerHTML = '';
+                var size = map.getSize();
+                var bounds = map.getBounds();
+                var west = bounds.getWest();
+                var east = bounds.getEast();
+                var south = bounds.getSouth();
+                var north = bounds.getNorth();
+                var lonSpan = east - west;
+                var latSpan = north - south;
+                if (lonSpan <= 0 || latSpan <= 0) return;
+
+                var lonStep = niceStep(lonSpan, 6);
+                var latStep = niceStep(latSpan, 5);
+
+                var lonStart = Math.ceil(west / lonStep) * lonStep;
+                for (var lon = lonStart; lon <= east; lon += lonStep) {
+                    var ptTop = map.latLngToContainerPoint([north, lon]);
+                    var ptBottom = map.latLngToContainerPoint([south, lon]);
+                    addLabel(fmtLon(lon), ptTop.x, 4, 'translateX(-50%)');
+                    addLabel(fmtLon(lon), ptBottom.x, size.y - 16, 'translateX(-50%)');
+                }
+
+                var latStart = Math.ceil(south / latStep) * latStep;
+                for (var lat = latStart; lat <= north; lat += latStep) {
+                    var ptLeft = map.latLngToContainerPoint([lat, west]);
+                    var ptRight = map.latLngToContainerPoint([lat, east]);
+                    addLabel(fmtLat(lat), 4, ptLeft.y, 'translateY(-50%)');
+                    addLabel(fmtLat(lat), size.x - 4, ptRight.y, 'translate(-100%, -50%)');
+                }
+            }
+
+            map.on('moveend', redraw);
+            map.on('zoomend', redraw);
+            map.whenReady(redraw);
+            setTimeout(redraw, 200);
+        })();
+        {% endmacro %}
+        """)
+
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
@@ -318,8 +378,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     for lon_line in range(0, 361, 30):
         folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
 
-    # 邊緣經緯度刻度文字（純 Folium DivIcon，不依賴外部 JS）
-    _add_edge_ticks(m)
+    # 邊緣經緯度刻度：跟著 moveend / zoomend 即時重算位置
+    EdgeTickOverlay().add_to(m)
 
     # 聚類設定 (MarkerCluster)
     marker_cluster = MarkerCluster(
