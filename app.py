@@ -228,13 +228,22 @@ def load_vessel_positions():
 @st.cache_data(ttl=60, show_spinner=False)
 def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
     if vessel_pos_df.empty: return vessel_pos_df
-    df_key = df["油輪"].astype(str).str.strip().str.lower()
+
+    # 效能優化（借用精簡版做法）：先用「油輪」欄位分組建立查找表，
+    # 每艘船用字典查詢 O(1)，而不是每艘船都重新掃描一次整份 df。
+    df = df.copy()
+    df["_key"] = df["油輪"].astype(str).str.strip().str.lower()
+    grouped = dict(tuple(df.groupby("_key")))
+    empty_df = df.iloc[0:0]  # 保留欄位結構的空 DataFrame，查無資料時當 fallback
+
     summary_rows = []
     
     for _, v in vessel_pos_df.iterrows():
         email_local = str(v.get("email_local", "")).strip().lower()
-        if email_local: vdf = df[df_key == email_local]
-        else: vdf = df[df["油輪"] == v["油輪"]]
+        if email_local:
+            vdf = grouped.get(email_local, empty_df)
+        else:
+            vdf = df[df["油輪"] == v["油輪"]]
 
         matched = not vdf.empty
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
@@ -646,7 +655,7 @@ def load_all_data():
                     is_kyc_fail = (s['imo'] != "-" and s['imo'] not in ship_map)
                     rows.append({
                         "油輪": clean_mail_field(fm.get('ships', '')).split('@')[0] or '-',
-                        "日期": pd.to_datetime(fm.get('date')) if fm.get('date') else pd.NaT,
+                        "日期": pd.to_datetime(fm.get('date'), errors='coerce'),
                         "位置": fm.get('Position', '-') or '-',
                         "船名": s_info.get('name', s['fv']),
                         "狀態": "KYC未通過" if is_kyc_fail else str(fm.get('category', 'PENDING')).upper(),
