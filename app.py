@@ -241,17 +241,23 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
-    valid = vessel_summary_df.dropna(subset=["lat", "lon"]) if not vessel_summary_df.empty else vessel_summary_df
-    if valid is None or valid.empty:
+    # 複製 DataFrame 以防更動到 cache
+    valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
+    if valid.empty:
         st.info("目前沒有可顯示座標的船舶資料。")
         return None
 
-    center_lat = valid["lat"].mean()
-    center_lon = valid["lon"].mean()
+    # ==========================================
+    # 🌎 核心解法：跨太平洋日期變更線處理 (Rotate Lon)
+    # 將所有位於西經的座標 (負數) 加上 360 度
+    # 這樣座標全部在 0~360 範圍，讓太平洋完美置中，不分裂！
+    # ==========================================
+    valid["map_lon"] = valid["lon"].apply(lambda x: x + 360 if pd.notnull(x) and x < 0 else x)
 
-    # 設定 min_zoom 與 tiles=None，並單獨加入圖層，並開啟 no_wrap，避免地圖重複
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=4, min_zoom=3, max_bounds=True, tiles=None)
-    folium.TileLayer('CartoDB positron', no_wrap=True).add_to(m)
+    center_lat = valid["lat"].mean()
+    center_lon = valid["map_lon"].mean()
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
@@ -276,9 +282,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         </div>
         """
 
-        # 將 tooltip 設為 permanent=True，無需點擊即會直接顯示在標記旁
         folium.Marker(
-            location=[v["lat"], v["lon"]],
+            location=[v["lat"], v["map_lon"]],  # 使用轉換後的置中經度
             tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
@@ -614,6 +619,7 @@ def apply_scroll_dismiss_tip(tip_id: str):
     """
     components.html(js, height=0, width=0)
 
+
 # --- 介面渲染 ---
 st.markdown("""
     <div class="compact-title">🚢 船隊實時調度報表</div>
@@ -647,36 +653,54 @@ if log:
         col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
-    # 載入地圖船舶資料
     vessel_pos_df = load_vessel_positions()
     vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
+
+    # ===============================================
+    # 解法：避免修改 Widget Key，建立中介變數 selected_tanker
+    # ===============================================
+    if "selected_tanker" not in st.session_state:
+        st.session_state["selected_tanker"] = "全部"
 
     # 頂部篩選器
     st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
+    
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
-        if "tanker_filter" not in st.session_state:
-            st.session_state["tanker_filter"] = "全部"
-        if st.session_state["tanker_filter"] not in tankers:
-            st.session_state["tanker_filter"] = "全部"
-        sel_tanker = st.selectbox("🚢 篩選油輪", tankers, key="tanker_filter")
+        if st.session_state["selected_tanker"] not in tankers:
+            st.session_state["selected_tanker"] = "全部"
+            
+        def _on_tanker_change():
+            st.session_state["selected_tanker"] = st.session_state.tanker_select_widget
+            
+        st.selectbox(
+            "🚢 篩選油輪", 
+            tankers, 
+            index=tankers.index(st.session_state["selected_tanker"]),
+            key="tanker_select_widget",
+            on_change=_on_tanker_change
+        )
+        
     with c2:
         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
+        
     with c3:
         valid_dates = df["日期"].dropna()
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
+        
     st.markdown('</div>', unsafe_allow_html=True)
-
     apply_mobile_filter_layout()
 
     # 資料過濾邏輯
     mask = pd.Series([True] * len(df))
-    if sel_tanker != "全部": mask &= (df["油輪"] == sel_tanker)
-    if sel_status != "全部": mask &= (df["狀態"] == sel_status)
+    if st.session_state["selected_tanker"] != "全部": 
+        mask &= (df["油輪"] == st.session_state["selected_tanker"])
+    if sel_status != "全部": 
+        mask &= (df["狀態"] == sel_status)
     if isinstance(sel_range, tuple) and len(sel_range) == 2:
         start_dt = pd.to_datetime(sel_range[0])
         end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
@@ -684,9 +708,7 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    # ===============================================
-    # 📌 提示詞區塊與地圖顯示區（移動至原提示詞位置）
-    # ===============================================
+    # 📌 提示詞區塊與地圖顯示區
     st.markdown('''
     <div id="scroll-tip" style="
         background-color:#1a3a5c;border:1px solid #2c5a8a;border-radius:6px;
@@ -702,10 +724,9 @@ if not df.empty:
     with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
         map_state = render_fleet_map(vessel_summary_df)
 
-        # 點擊地圖上的船 → 連動下方表格篩選（設定 selectbox 的 key）
+        # 點擊地圖上的船 → 連動修改 selected_tanker (不再會觸發 APIException)
         clicked_vessel = None
         if map_state and map_state.get("last_object_clicked_tooltip"):
-            # 取出原本被加上 <b> 標籤的名稱 (因 permanent tooltip 會連同 HTML 一起捕捉)
             clicked_html = map_state["last_object_clicked_tooltip"]
             clicked_vessel = clicked_html.replace('<b>', '').replace('</b>', '').strip()
 
@@ -714,11 +735,13 @@ if not df.empty:
 
             match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
             if not match_row.empty and match_row["matched"].iloc[0]:
-                st.session_state["tanker_filter"] = match_row["matched_油輪"].iloc[0]
+                # 設定我們的中介狀態，而非直接操作元件的 key
+                st.session_state["selected_tanker"] = match_row["matched_油輪"].iloc[0]
             else:
-                st.session_state["tanker_filter"] = "全部"
-                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件（Email 帳號名稱對不起來）")
+                st.session_state["selected_tanker"] = "全部"
+                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件")
             st.rerun()
+
     # ===============================================
 
     DF_KEY = "email_table"
@@ -743,7 +766,6 @@ if not df.empty:
     with col_list:
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
-        # 2a. 狀態顏色邏輯 (只設定 30% 背景色)
         def style_status(val):
             val_upper = str(val).upper().strip()
             if "APPROVED" in val_upper: 
@@ -756,7 +778,6 @@ if not df.empty:
                 return "background-color: rgba(255, 243, 205, 0.3);"
             return ""
 
-        # 2b. 判斷並標示「有效配對」的 IMO 邏輯 (只設定 50% 背景色)
         valid_dup_indices = set()
         valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
         valid_df = display_df[valid_imo_mask]
