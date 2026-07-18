@@ -88,6 +88,29 @@ st.markdown("""
     }
     /* 全站區塊間距收緊，畫面更緊湊 */
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
+
+    /* ==========================================
+       ✨ 船名標籤淡化與高負載閃爍動畫
+       ========================================== */
+    .leaflet-tooltip {
+        background-color: rgba(255, 255, 255, 0.65) !important;
+        border: 1px solid rgba(200, 200, 200, 0.2) !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
+        font-size: 11px !important;
+        font-weight: 600 !important;
+        padding: 2px 6px !important;
+        backdrop-filter: blur(2px);
+    }
+    /* 隱藏標籤旁邊突出的小箭頭，讓畫面更乾淨 */
+    .leaflet-tooltip-right::before, .leaflet-tooltip-left::before {
+        display: none !important; 
+    }
+    /* 滿載警示閃爍動畫 */
+    @keyframes warning-blink {
+        0% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.6; transform: scale(1.05); }
+        100% { opacity: 1; transform: scale(1); }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -248,17 +271,21 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
         active_vdf = vdf.drop(index=list(paired_indices))
 
-        # 「準備加油」：排除結案後，並且 IMO 必須為有效值，才算入準備加油數量
-        active_valid_imo_df = active_vdf[~active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-        ready_count = int(active_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False).sum())
-
-        # 抓「最新一筆的日期」往前推 5 天內的『未結案』紀錄給清單
+        # 抓「最新一筆的日期」往前推 5 天內的『未結案』紀錄
         recent_sorted = active_vdf.sort_values("日期", ascending=False)
         if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
             cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=5)
+            recent_active_vdf = active_vdf[active_vdf["日期"] >= cutoff]
             recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
-            
-        # 限制最多不超過 10 筆，並保留日期供 Popup 顯示
+        else:
+            recent_active_vdf = pd.DataFrame()
+
+        # 「準備加油」：限縮在 5 天內、必須為有效 IMO，且排除重複的 IMO
+        recent_valid_imo_df = recent_active_vdf[~recent_active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+        ready_df = recent_valid_imo_df[recent_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False)]
+        ready_count = int(ready_df['IMO'].nunique())
+
+        # 清單：保留最多 10 筆顯示於 Popup
         recent_orders = recent_sorted.head(10)[["日期", "狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
 
         row = v.to_dict()
@@ -456,17 +483,30 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     ).add_to(m)
 
     for _, v in valid.iterrows():
-        color = _MARKER_COLOR.get(v["status"], "blue")
         last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
         latest_date_str = (
             pd.to_datetime(v["latest_date"]).strftime("%m/%d %H:%M")
             if pd.notnull(v.get("latest_date")) else "-"
         )
         match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
-        
         recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
-        # 更新 Popup：加入「準備加油」與「已完成」
+        # ==========================================
+        # 🚨 高負載警示判斷 (準備加油 >= 10)
+        # ==========================================
+        ready_count = v.get('ready_count', 0)
+        if ready_count >= 10:
+            # 加入閃爍動畫的紅色標籤
+            tooltip_html = f"<div style='color:#d32f2f; animation: warning-blink 1.5s infinite;'>🚨 {v['油輪']}</div>"
+            marker_color = "red"
+            icon_type = "fire"
+        else:
+            # 輕量化的灰色標籤
+            tooltip_html = f"<div style='color:#666;'>{v['油輪']}</div>"
+            marker_color = _MARKER_COLOR.get(v["status"], "blue")
+            icon_type = "ship"
+
+        # Popup 詳細內容
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
@@ -475,7 +515,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             動態：航向 {v['heading']:.0f}° ・ 速度 {v['speed']:.1f} kn<br>
             最後訊號：{last_signal_str}（{v['signal_hours']:.1f} hr 前）<br>
             <hr style="margin:6px 0;">
-            ✅ 準備加油 <b>{v.get('ready_count', 0)}</b> ・
+            ✅ 準備加油 <b>{ready_count}</b> ・
             🏁 已完成 <b>{v.get('completed_count', 0)}</b>
             {recent_orders_html}
             {match_line}
@@ -484,9 +524,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
 
         folium.Marker(
             location=[v["lat"], v["map_lon"]],  
-            tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
+            tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
-            icon=folium.Icon(color=color, icon="ship", prefix="fa"),
+            icon=folium.Icon(color=marker_color, icon=icon_type, prefix="fa"),
         ).add_to(marker_cluster)
 
     map_state = st_folium(
@@ -848,7 +888,8 @@ if not df.empty:
         clicked_vessel = None
         if map_state and map_state.get("last_object_clicked_tooltip"):
             clicked_html = map_state["last_object_clicked_tooltip"]
-            clicked_vessel = clicked_html.replace('<b>', '').replace('</b>', '').strip()
+            # 移除所有 HTML 標籤抓取船名 (對應高負載或一般狀態的 tooltip)
+            clicked_vessel = re.sub(r'<[^>]*>', '', clicked_html).replace('🚨', '').replace('🔥', '').strip()
 
         if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
             st.session_state["_last_clicked_vessel"] = clicked_vessel
