@@ -5,7 +5,7 @@ import os, yaml, json, re, io
 from datetime import datetime, timezone, timedelta
 
 import folium
-from folium.plugins import Graticule, MarkerCluster
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -261,9 +261,6 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     center_lon = valid["map_lon"].mean()
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
-
-    # 疊加經緯度網格線
-    Graticule(color="#d0d0d0", weight=0.8, opacity=0.5).add_to(m)
 
     # ==========================================
     # 聚類顯示：防重疊並提升渲染效能
