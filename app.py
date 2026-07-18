@@ -130,12 +130,31 @@ def _parse_speed_field(raw):
     return {"speed": speed, "heading": heading}
 
 
+def _find_column(columns, candidates):
+    """
+    依「標題文字」動態找欄位，不用固定欄位位置。
+    candidates 是一組候選關鍵字（小寫），完全比對優先，找不到再用包含比對。
+    """
+    normalized = {str(c).strip().lower(): c for c in columns}
+    for cand in candidates:
+        if cand in normalized:
+            return normalized[cand]
+    for col_lower, col_orig in normalized.items():
+        for cand in candidates:
+            if cand in col_lower:
+                return col_orig
+    return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_vessel_positions():
     """
     直接用公開的 CSV 匯出網址讀取 VesselData 分頁，
     不需要任何 Google API 憑證。
     前提：Google Sheet 共用設定為「知道連結的人都可以檢視」。
+
+    欄位一律用「標題文字」動態尋找（而不是固定欄位位置），
+    這樣即使之後欄位順序調整也不會讀錯。
     """
     csv_url = (
         f"https://docs.google.com/spreadsheets/d/{VMS_SPREADSHEET_ID}"
@@ -147,22 +166,41 @@ def load_vessel_positions():
         st.sidebar.error(f"⚠️ 無法讀取船位資料（VesselData）：{e}")
         return pd.DataFrame()
 
+    col_name = _find_column(raw.columns, ["vessel name", "vessel", "name"])
+    col_last_signal = _find_column(raw.columns, ["last signal", "signal"])
+    col_location = _find_column(raw.columns, ["location", "position"])
+    col_speed = _find_column(raw.columns, ["speed/direction", "speed", "direction"])
+    col_validity = _find_column(raw.columns, ["validity"])
+    col_remark = _find_column(raw.columns, ["remark"])
+    col_email = _find_column(raw.columns, ["email", "e-mail", "mail"])
+
+    if col_name is None or col_last_signal is None:
+        st.sidebar.error("⚠️ VesselData 找不到「Vessel Name」或「Last Signal」標題欄位，請檢查表頭文字。")
+        return pd.DataFrame()
+    if col_email is None:
+        st.sidebar.warning("⚠️ VesselData 找不到「Email」標題欄位，將無法跟郵件訂單資料配對。")
+
     now = datetime.now()
     rows = []
     for _, r in raw.iterrows():
-        vessel_name = str(r.iloc[0]).strip() if pd.notna(r.iloc[0]) else ""
+        vessel_name = str(r[col_name]).strip() if pd.notna(r[col_name]) else ""
         if not vessel_name:
             continue
 
-        last_signal = _parse_custom_date(r.iloc[1]) if len(r) > 1 else None
+        last_signal = _parse_custom_date(r[col_last_signal])
         if not last_signal:
             continue
 
-        pos = _parse_position(r.iloc[2]) if len(r) > 2 else None
-        speed_info = _parse_speed_field(r.iloc[3]) if len(r) > 3 else {"speed": 0, "heading": 0}
-        validity = str(r.iloc[5]) if len(r) > 5 and pd.notna(r.iloc[5]) else "0/6"
+        pos = _parse_position(r[col_location]) if col_location and pd.notna(r[col_location]) else None
+        speed_info = _parse_speed_field(r[col_speed]) if col_speed and pd.notna(r[col_speed]) else {"speed": 0, "heading": 0}
+        validity = str(r[col_validity]) if col_validity and pd.notna(r[col_validity]) else "0/6"
         valid_count = int(validity.split('/')[0]) if '/' in validity and validity.split('/')[0].isdigit() else 0
-        remark = str(r.iloc[6]) if len(r) > 6 and pd.notna(r.iloc[6]) else ""
+        remark = str(r[col_remark]) if col_remark and pd.notna(r[col_remark]) else ""
+
+        # 從 Email 欄位取出「@ 前面」的帳號名稱，當作跟郵件資料配對的 key
+        # （data_John 解析出來的「油輪」欄位本身就是 email 帳號名稱）
+        email_raw = str(r[col_email]).strip().lower() if col_email and pd.notna(r[col_email]) else ""
+        email_local = email_raw.split('@')[0].strip() if '@' in email_raw else email_raw
 
         signal_hours = (now - last_signal).total_seconds() / 3600
         no_signal = signal_hours > SIGNAL_LIMIT_HOURS
@@ -177,6 +215,8 @@ def load_vessel_positions():
 
         rows.append({
             "油輪": vessel_name,
+            "email": email_raw,
+            "email_local": email_local,
             "lat": pos["lat"] if pos else None,
             "lon": pos["lon"] if pos else None,
             "speed": speed_info["speed"],
@@ -195,14 +235,30 @@ def load_vessel_positions():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
-    """把船位資料跟訂單資料 (df) 合併成摘要"""
+    """
+    把船位資料跟訂單資料 (df) 合併成摘要。
+
+    配對邏輯：VesselData 的「Vessel Name」(例：ANGEL 101) 跟 data_John
+    解析出來的「油輪」欄位 (例：angel101，來自郵件寄件位址的帳號名稱)
+    文字格式對不起來，不能直接比對名字。改用 Email 帳號名稱（@ 前面
+    那段，忽略大小寫/空白）當配對鍵，因為兩邊本質上是同一個帳號名稱。
+    """
     if vessel_pos_df.empty:
         return vessel_pos_df
 
+    df_key = df["油輪"].astype(str).str.strip().str.lower()
+
     summary_rows = []
     for _, v in vessel_pos_df.iterrows():
-        name = v["油輪"]
-        vdf = df[df["油輪"] == name]
+        email_local = str(v.get("email_local", "")).strip().lower()
+
+        if email_local:
+            vdf = df[df_key == email_local]
+        else:
+            # Email 欄位沒抓到資料時，退回用船名文字比對（多半配不到，僅作保底）
+            vdf = df[df["油輪"] == v["油輪"]]
+
+        matched = not vdf.empty
 
         pending_count = int((vdf["狀態"] == "PENDING").sum())
         approved_count = int(vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
@@ -213,8 +269,14 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
+        # 配對成功時，取郵件資料裡實際使用的「油輪」寫法，
+        # 讓地圖點擊後可以正確對到下方篩選器的選項
+        matched_name = vdf["油輪"].iloc[0] if matched else None
+
         row = v.to_dict()
         row.update({
+            "matched": matched,
+            "matched_油輪": matched_name,
             "pending_count": pending_count,
             "approved_count": approved_count,
             "completed_count": completed_count,
@@ -253,6 +315,12 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             else "-"
         )
 
+        match_line = (
+            ""
+            if v.get("matched")
+            else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料（請確認 Email 帳號名稱）</div>'
+        )
+
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
@@ -263,6 +331,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             ✅ 已核准 <b>{v.get('approved_count', 0)}</b> ・
             🏁 已完成 <b>{v.get('completed_count', 0)}</b><br>
             最新郵件（{latest_date_str}）：{v.get('latest_subject', '-')}
+            {match_line}
         </div>
         """
 
@@ -632,7 +701,14 @@ if not df.empty:
 
         if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
             st.session_state["_last_clicked_vessel"] = clicked_vessel
-            st.session_state["tanker_filter"] = clicked_vessel
+
+            # 用配對結果去對應下方表格「油輪」篩選器實際使用的寫法
+            match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
+            if not match_row.empty and match_row["matched"].iloc[0]:
+                st.session_state["tanker_filter"] = match_row["matched_油輪"].iloc[0]
+            else:
+                st.session_state["tanker_filter"] = "全部"
+                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件（Email 帳號名稱對不起來）")
             st.rerun()
 
 # 數據看板 (Metrics)
