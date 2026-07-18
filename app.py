@@ -255,19 +255,20 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         # 📌 排除已配對結案的紀錄，計算出「準備加油」與近期清單
         # ==========================================
         paired_indices = set()
-        valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-        for imo, group in valid_imo_df.groupby('IMO'):
-            approves = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
-            completes = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
-            if not approves.empty and not completes.empty:
-                for a_idx, a_row in approves.iterrows():
-                    for c_idx, c_row in completes.iterrows():
-                        a_time, c_time = a_row['日期'], c_row['日期']
-                        if pd.notnull(a_time) and pd.notnull(c_time):
-                            diff = c_time - a_time
-                            if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
-                                paired_indices.add(a_idx)
-                                paired_indices.add(c_idx)
+        if 'IMO' in vdf.columns:
+            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+            for imo, group in valid_imo_df.groupby('IMO'):
+                approves = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
+                completes = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
+                if not approves.empty and not completes.empty:
+                    for a_idx, a_row in approves.iterrows():
+                        for c_idx, c_row in completes.iterrows():
+                            a_time, c_time = a_row['日期'], c_row['日期']
+                            if pd.notnull(a_time) and pd.notnull(c_time):
+                                diff = c_time - a_time
+                                if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
+                                    paired_indices.add(a_idx)
+                                    paired_indices.add(c_idx)
 
         active_vdf = vdf.drop(index=list(paired_indices))
 
@@ -278,12 +279,16 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             recent_active_vdf = active_vdf[active_vdf["日期"] >= cutoff]
             recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
         else:
-            recent_active_vdf = pd.DataFrame()
+            # 🐛 修正錯誤：使用 active_vdf.iloc[0:0] 產生帶有正確欄位(如IMO)的空表
+            recent_active_vdf = active_vdf.iloc[0:0]
 
         # 「準備加油」：限縮在 5 天內、必須為有效 IMO，且排除重複的 IMO
-        recent_valid_imo_df = recent_active_vdf[~recent_active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-        ready_df = recent_valid_imo_df[recent_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False)]
-        ready_count = int(ready_df['IMO'].nunique())
+        if not recent_active_vdf.empty and 'IMO' in recent_active_vdf.columns:
+            recent_valid_imo_df = recent_active_vdf[~recent_active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+            ready_df = recent_valid_imo_df[recent_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False)]
+            ready_count = int(ready_df['IMO'].nunique())
+        else:
+            ready_count = 0
 
         # 清單：保留最多 10 筆顯示於 Popup
         recent_orders = recent_sorted.head(10)[["日期", "狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
