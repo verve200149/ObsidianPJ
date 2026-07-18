@@ -10,10 +10,8 @@ from streamlit_folium import st_folium
 
 # ==========================================
 # 🛡️ 維護建議：
-# 由於腳本使用了自定義 JS 操作 DOM (排版分割與手機版優化)，
-# 強烈建議在部署的 requirements.txt 中綁定目前的 Streamlit 版本，
-# 例如: streamlit==1.36.0 (或您當前使用的版本)，
-# 以避免未來官方更新 UI 結構時導致排版失效。
+# 建議在部署的 requirements.txt 中綁定目前的 Streamlit 版本，
+# 例如: streamlit==1.36.0，以避免未來官方更新 UI 結構時導致排版失效。
 # ==========================================
 
 # 建議將網頁預設為寬螢幕佈局
@@ -261,6 +259,23 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     center_lon = valid["map_lon"].mean()
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
+
+    # ==========================================
+    # 🌐 自訂繪製虛線經緯度網格 (無須額外依賴 Plugin)
+    # ==========================================
+    # 畫緯線 (橫線) 每 15 度一條
+    for lat_line in range(-75, 76, 15):
+        folium.PolyLine(
+            locations=[[lat_line, 0], [lat_line, 360]], 
+            color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
+        ).add_to(m)
+        
+    # 畫經線 (直線) 每 15 度一條 (0~360 對應原來的 -180~180)
+    for lon_line in range(0, 361, 15):
+        folium.PolyLine(
+            locations=[[-80, lon_line], [80, lon_line]], 
+            color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
+        ).add_to(m)
 
     # ==========================================
     # 聚類顯示：防重疊並提升渲染效能
