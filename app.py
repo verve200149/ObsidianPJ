@@ -5,9 +5,7 @@ import os, yaml, json, re, io
 from datetime import datetime, timezone, timedelta
 
 import folium
-from folium.plugins import MarkerCluster, MousePosition
-from folium.elements import MacroElement
-from jinja2 import Template
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -90,47 +88,6 @@ st.markdown("""
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
     </style>
     """, unsafe_allow_html=True)
-
-# ==========================================
-# 🗺️ 自訂 Folium 元件：自適應邊緣網格標籤
-# ==========================================
-class EdgeGraticule(MacroElement):
-    """
-    透過注入 Leaflet.latlng-graticule 插件，
-    實現動態適應地圖外框的邊緣經緯度標籤，並處理太平洋置中的經度轉換。
-    """
-    def __init__(self):
-        super().__init__()
-        self._template = Template("""
-        {% macro header(this, kwargs) %}
-        <script src="https://unpkg.com/leaflet.latlng-graticule/leaflet.latlng-graticule.js"></script>
-        {% endmacro %}
-
-        {% macro script(this, kwargs) %}
-        var graticule_{{ this.get_name() }} = L.latlngGraticule({
-            showLabel: true,
-            color: '#a0a0a0',
-            weight: 0.6,
-            dashArray: [4, 4],
-            zoomInterval: [
-                {start: 2, end: 4, interval: 30},
-                {start: 5, end: 6, interval: 15},
-                {start: 7, end: 20, interval: 5}
-            ],
-            lngFormatTickLabel: function(lng) {
-                var l = lng % 360;
-                if (l > 180) l -= 360;
-                else if (l < -180) l += 360;
-                if (l === 0 || Math.abs(l) === 180) return Math.abs(l) + '&deg;';
-                return Math.abs(l).toFixed(0) + (l > 0 ? '&deg;E' : '&deg;W');
-            },
-            latFormatTickLabel: function(lat) {
-                if (lat === 0) return '0&deg;';
-                return Math.abs(lat).toFixed(0) + (lat > 0 ? '&deg;N' : '&deg;S');
-            }
-        }).addTo({{ this._parent.get_name() }});
-        {% endmacro %}
-        """)
 
 # ==========================================
 # 🗺️ 船隊地圖相關：常數與工具函式
@@ -289,6 +246,55 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 
+
+def _format_lon_tick(map_lon):
+    """把 0~360 的內部座標換算回一般人看得懂的東經/西經標示"""
+    real = map_lon - 360 if map_lon > 180 else map_lon
+    if real == 0:
+        return "0°"
+    if abs(real) == 180:
+        return "180°"
+    return f"{abs(real):.0f}°{'E' if real > 0 else 'W'}"
+
+
+def _format_lat_tick(lat):
+    if lat == 0:
+        return "0°"
+    return f"{abs(lat):.0f}°{'N' if lat > 0 else 'S'}"
+
+
+def _add_tick_label(m, lat, lon, text):
+    """
+    純 Folium 內建 DivIcon 標記文字，不依賴任何外部 CDN／JS 套件，
+    在 streamlit-folium 的 iframe 環境下最穩定不會失效。
+    """
+    html = (
+        '<div style="font-size:10px; color:#546e7a; font-weight:bold; '
+        'background:rgba(255,255,255,0.8); padding:1px 4px; border-radius:2px; '
+        'white-space:nowrap; pointer-events:none;">' + text + '</div>'
+    )
+    folium.Marker(
+        location=[lat, lon],
+        icon=folium.DivIcon(html=html, icon_size=(0, 0), icon_anchor=(0, 0)),
+    ).add_to(m)
+
+
+def _add_edge_ticks(m):
+    """在網格線的四個邊緣貼上經緯度刻度文字"""
+    LAT_EDGE, LON_MIN, LON_MAX = 80, 0, 360
+
+    # 左右兩側：緯度刻度
+    for lat_line in range(-75, 76, 15):
+        label = _format_lat_tick(lat_line)
+        _add_tick_label(m, lat_line, LON_MIN + 1, label)
+        _add_tick_label(m, lat_line, LON_MAX - 1, label)
+
+    # 上下兩側：經度刻度
+    for lon_line in range(0, 361, 30):
+        label = _format_lon_tick(lon_line)
+        _add_tick_label(m, LAT_EDGE - 1, lon_line, label)
+        _add_tick_label(m, -LAT_EDGE + 1, lon_line, label)
+
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
     if valid.empty:
@@ -311,6 +317,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     # 畫經線 (直線) 每 30 度一條
     for lon_line in range(0, 361, 30):
         folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
+
+    # 邊緣經緯度刻度文字（純 Folium DivIcon，不依賴外部 JS）
+    _add_edge_ticks(m)
 
     # 聚類設定 (MarkerCluster)
     marker_cluster = MarkerCluster(
