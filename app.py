@@ -301,33 +301,18 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     center_lat = valid["lat"].mean()
     center_lon = valid["map_lon"].mean()
 
+    # 初始化地圖
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
-    # ==========================================
-    # 📍 新增：動態滑鼠座標顯示器 (右上角)
-    # 用 JS 轉換，讓大於 180 的經度自動減去 360 變回西經 (W)
-    # ==========================================
-    formatter_lon = "function(num) { var lng = num % 360; if (lng > 180) lng -= 360; else if (lng < -180) lng += 360; return lng.toFixed(4) + '°'; };"
-    formatter_lat = "function(num) { return num.toFixed(4) + '°'; };"
-    
-    MousePosition(
-        position="topright",
-        separator=" , ",
-        empty_string="NaN",
-        lng_first=False,
-        prefix="📍 座標: ",
-        lat_formatter=formatter_lat,
-        lng_formatter=formatter_lon
-    ).add_to(m)
+    # 繪製經緯網格線 (純 Python 實現，極度穩定)
+    # 畫緯線 (橫線) 每 15 度一條
+    for lat_line in range(-75, 76, 15):
+        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
+    # 畫經線 (直線) 每 30 度一條
+    for lon_line in range(0, 361, 30):
+        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
 
-    # ==========================================
-    # 🌐 注入自適應邊緣網格 (取代原有的手繪靜態線條)
-    # ==========================================
-    EdgeGraticule().add_to(m)
-
-    # ==========================================
-    # 聚類顯示：防重疊並提升渲染效能
-    # ==========================================
+    # 聚類設定 (MarkerCluster)
     marker_cluster = MarkerCluster(
         options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}
     ).add_to(m)
@@ -341,6 +326,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         )
         match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
 
+        # 詳細資訊 Popup
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
@@ -364,14 +350,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
         ).add_to(marker_cluster)
 
-    map_state = st_folium(
-        m,
-        height=460,
-        use_container_width=True,
-        key="fleet_map",
-        returned_objects=["last_object_clicked_tooltip"],
-    )
-    return map_state
+    return st_folium(m, height=460, use_container_width=True, key="fleet_map")
 
 
 # --- 1. 讀取 Update Log ---
