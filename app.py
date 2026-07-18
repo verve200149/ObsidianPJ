@@ -243,9 +243,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
-        # ==========================================
-        # 1. 核心邏輯：過濾掉「已完成」的對應組 (IMO 配對排除)
-        # ==========================================
+        # 排除結案紀錄
         paired_indices = set()
         if 'IMO' in vdf.columns:
             valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
@@ -262,14 +260,12 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                                     paired_indices.add(c_idx)
 
         active_vdf = vdf.drop(index=list(paired_indices))
-
-        # ==========================================
-        # 2. 準備加油與近期清單計算 (限近五天)
-        # ==========================================
+        
+        # 近五天資料篩選
         cutoff = datetime.now(TAIPEI_TZ) - pd.Timedelta(days=5)
         recent_active = active_vdf[active_vdf["日期"] >= cutoff].copy()
         
-        # 準備加油：排除無效 IMO，去重後的 APPROVED 數量
+        # 準備加油計算 (IMO 去重)
         ready_count = 0
         if not recent_active.empty and 'IMO' in recent_active.columns:
             ready_df = recent_active[
@@ -278,10 +274,9 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             ]
             ready_count = int(ready_df['IMO'].nunique())
 
-        # 近期清單：IMO 去重 (保留最新一筆)，最多 10 筆
+        # 清單計算 (IMO 去重)
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
-            # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
             recent_active['temp_id'] = recent_active['IMO'].replace('-', None).fillna(recent_active.index.to_series())
             recent_orders = recent_active.drop_duplicates(subset=['temp_id'], keep='first').head(10)[["日期", "狀態", "船名"]].to_dict("records")
         else:
