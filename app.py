@@ -5,7 +5,7 @@ import os, yaml, json, re, io
 from datetime import datetime, timezone, timedelta
 
 import folium
-from folium.plugins import MarkerCluster
+from folium.plugins import MarkerCluster, MousePosition
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -261,7 +261,24 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
     # ==========================================
-    # 🌐 自訂繪製虛線經緯度網格 (無須額外依賴 Plugin)
+    # 📍 新增 1：動態滑鼠座標顯示器 (右上角)
+    # 用 JS 轉換，讓大於 180 的經度自動減去 360 變回西經 (W)
+    # ==========================================
+    formatter_lon = "function(num) { var lng = num % 360; if (lng > 180) lng -= 360; else if (lng < -180) lng += 360; return lng.toFixed(4) + '°'; };"
+    formatter_lat = "function(num) { return num.toFixed(4) + '°'; };"
+    
+    MousePosition(
+        position="topright",
+        separator=" , ",
+        empty_string="NaN",
+        lng_first=False,
+        prefix="📍 座標: ",
+        lat_formatter=formatter_lat,
+        lng_formatter=formatter_lon
+    ).add_to(m)
+
+    # ==========================================
+    # 🌐 新增 2：自訂繪製虛線網格 + 靜態文字標示
     # ==========================================
     # 畫緯線 (橫線) 每 15 度一條
     for lat_line in range(-75, 76, 15):
@@ -270,18 +287,38 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
         ).add_to(m)
         
+        # 緯度文字標籤
+        if lat_line == 0: lat_str = "0°"
+        elif lat_line > 0: lat_str = f"{lat_line}°N"
+        else: lat_str = f"{-lat_line}°S"
+            
+        folium.Marker(
+            location=[lat_line, 180],  # 標示在太平洋中線上
+            icon=folium.DivIcon(html=f'<div style="font-size:11px; color:#808080; font-weight:bold; padding:2px; text-shadow: 1px 1px 1px #fff;">{lat_str}</div>')
+        ).add_to(m)
+
     # 畫經線 (直線) 每 15 度一條 (0~360 對應原來的 -180~180)
     for lon_line in range(0, 361, 15):
         folium.PolyLine(
             locations=[[-80, lon_line], [80, lon_line]], 
             color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
         ).add_to(m)
+        
+        # 經度文字標籤
+        if lon_line == 0 or lon_line == 360: lon_str = "0°"
+        elif lon_line == 180: lon_str = "180°"
+        elif lon_line < 180: lon_str = f"{lon_line}°E"
+        else: lon_str = f"{360 - lon_line}°W"
+            
+        folium.Marker(
+            location=[0, lon_line],  # 標示在赤道上
+            icon=folium.DivIcon(html=f'<div style="font-size:11px; color:#808080; font-weight:bold; padding:2px; text-shadow: 1px 1px 1px #fff;">{lon_str}</div>')
+        ).add_to(m)
 
     # ==========================================
     # 聚類顯示：防重疊並提升渲染效能
     # ==========================================
     marker_cluster = MarkerCluster(
-        # 可自訂選項，讓 Cluster 的外觀更符合系統
         options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}
     ).add_to(m)
 
@@ -315,7 +352,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
-        ).add_to(marker_cluster)  # 將船隻加進群組中，而非直接加在地圖上
+        ).add_to(marker_cluster)
 
     map_state = st_folium(
         m,
