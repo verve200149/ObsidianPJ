@@ -264,7 +264,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         active_vdf["日期"] = pd.to_datetime(active_vdf["日期"], errors='coerce')
         valid_date_vdf = active_vdf.dropna(subset=["日期"])
         
-        cutoff = datetime.now(TAIPEI_TZ) - pd.Timedelta(days=5)
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=5)
         # 使用過濾後的 valid_date_vdf 進行比較，避免 TypeError
         recent_active = valid_date_vdf[valid_date_vdf["日期"] >= cutoff].copy()
         
