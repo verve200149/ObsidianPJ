@@ -231,8 +231,13 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         matched_name = vdf["油輪"].iloc[0] if matched else None
 
         # 最近 5 筆訂單紀錄（狀態 + 船名），給地圖 popup 顯示用
-        recent = vdf.sort_values("日期", ascending=False).head(5)
-        recent_orders = recent[["狀態", "船名"]].to_dict("records") if not recent.empty else []
+        # 最近訂單紀錄（狀態 + 船名），給地圖 popup 顯示用：
+        # 抓「最新一筆的日期」往前推 2 天內的所有紀錄
+        recent_sorted = vdf.sort_values("日期", ascending=False)
+        if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
+            cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=2)
+            recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
+        recent_orders = recent_sorted[["狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
 
         row = v.to_dict()
         row.update({
@@ -371,7 +376,7 @@ def _status_emoji(status):
 
 def _build_recent_orders_html(recent_orders):
     """組出 popup 裡「近期訂單」的清單 HTML：預設顯示前 3 筆，
-    有第 4~5 筆的話用 <details> 收合起來，點「顯示更多」才展開。"""
+    其餘（最近兩天內的紀錄）用 <details> 收合起來，點「顯示更多」才展開。"""
     if not recent_orders:
         return '<div style="color:#999; margin-top:2px;">尚無訂單紀錄</div>'
 
@@ -383,15 +388,17 @@ def _build_recent_orders_html(recent_orders):
             f'{_status_emoji(status)} <b>{status}</b> ・ {ship}</div>'
         )
 
-    items = [_item(o) for o in recent_orders]
+    MAX_TOTAL = 30  # 安全上限，避免單一船隻兩天內異常大量紀錄把 popup 撐爆
+    items = [_item(o) for o in recent_orders[:MAX_TOTAL]]
     html = '<div style="margin-top:4px;">' + "".join(items[:3])
 
     if len(items) > 3:
-        rest_html = "".join(items[3:5])
+        rest_html = "".join(items[3:])
         html += (
             f'<details style="margin-top:2px;">'
-            f'<summary style="cursor:pointer; color:#1a73e8; font-size:11px;">'
-            f'顯示更多（共 {len(items)} 筆）</summary>{rest_html}</details>'
+            f'<summary style="cursor:pointer; color:#1a73e8; font-size:11px; '
+            f'outline:none; -webkit-tap-highlight-color:transparent; list-style:none;">'
+            f'顯示更多（近兩天共 {len(recent_orders)} 筆）</summary>{rest_html}</details>'
         )
 
     html += "</div>"
