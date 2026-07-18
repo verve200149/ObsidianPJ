@@ -277,11 +277,21 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         # 使用過濾後的 valid_date_vdf 進行比較，避免 TypeError
         recent_active = valid_date_vdf[valid_date_vdf["日期"] >= cutoff].copy()
         
-        # 準備加油：排除無效 IMO，去重後的 APPROVED 數量
+        # 準備加油：排除無效 IMO、排除已取消(CANCELLED)的 IMO，去重後的 APPROVED 數量
+        # 原本只檢查該筆紀錄本身是不是 APPROVED，沒有檢查同一艘船的同一個 IMO
+        # 是否「後來又被取消」——一筆訂單先 APPROVED 後來又 CANCELLED，
+        # 舊邏輯仍然會被算進「準備加油」，這裡補上排除。
+        cancelled_imos = set()
+        if 'IMO' in vdf.columns:
+            cancelled_imos = set(
+                vdf.loc[vdf['狀態'].str.contains('CANCEL', case=False, na=False), 'IMO']
+            )
+
         ready_count = 0
         if not recent_active.empty and 'IMO' in recent_active.columns:
             ready_df = recent_active[
-                (~recent_active['IMO'].isin(['-', '', '(本次無資料)'])) & 
+                (~recent_active['IMO'].isin(['-', '', '(本次無資料)'])) &
+                (~recent_active['IMO'].isin(cancelled_imos)) &
                 (recent_active["狀態"].str.contains("APPROVED", case=False, na=False))
             ]
             ready_count = int(ready_df['IMO'].nunique())
@@ -316,6 +326,97 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
 
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
+
+# 訊號狀態對應的實際顏色（畫船舶 icon 用，folium.Icon 的具名色系用不到 SVG 上）
+_MARKER_HEX = {"🔴 No Signal": "#e53935", "🟡 Weak": "#fb8c00", "🟢 Normal": "#2e7d32"}
+
+# 主要港口／島國參考點（對應原本 GAS 腳本裡的 MAJOR_PORTS）
+MAJOR_PORTS = [
+    {"name": "Kaohsiung", "lat": 22.61, "lon": 120.31},
+    {"name": "Singapore", "lat": 1.26, "lon": 103.83},
+    {"name": "Busan", "lat": 35.10, "lon": 129.04},
+    {"name": "Yeosu", "lat": 34.74, "lon": 127.75},
+    {"name": "Callao", "lat": -12.06, "lon": -77.15},
+    {"name": "Valparaiso", "lat": -33.04, "lon": -71.62},
+    {"name": "San Antonio", "lat": -33.58, "lon": -71.63},
+    {"name": "Antofagasta", "lat": -23.65, "lon": -70.40},
+    {"name": "Dili", "lat": -8.55, "lon": 125.57},
+    {"name": "Christmas Is.", "lat": -10.42, "lon": 105.67},
+    {"name": "Kiritimati", "lat": 1.87, "lon": -157.42},
+    {"name": "Pohnpei", "lat": 6.92, "lon": 158.15},
+    {"name": "Kosrae", "lat": 5.32, "lon": 162.98},
+    {"name": "Tuvalu", "lat": -8.52, "lon": 179.19},
+    {"name": "Nauru", "lat": -0.53, "lon": 166.91},
+    {"name": "Marshall Is.", "lat": 7.09, "lon": 171.38},
+    {"name": "Rabaul", "lat": -4.20, "lon": 152.18},
+    {"name": "Papeete", "lat": -17.53, "lon": -149.57},
+]
+
+
+def _add_major_ports(m):
+    """在地圖上標示主要港口／島國參考點（小圓點 + 淡灰色文字），
+    方便判斷船隻目前大概位於哪個海域附近。"""
+    for p in MAJOR_PORTS:
+        map_lon = p["lon"] + 360 if p["lon"] < 0 else p["lon"]
+        folium.CircleMarker(
+            location=[p["lat"], map_lon],
+            radius=3,
+            color="#78909c",
+            weight=1,
+            fill=True,
+            fill_color="#cfd8dc",
+            fill_opacity=0.9,
+            tooltip=p["name"],
+        ).add_to(m)
+        folium.Marker(
+            location=[p["lat"], map_lon],
+            icon=folium.DivIcon(
+                html=(
+                    '<div style="font-size:9px; color:#78909c; font-weight:600; '
+                    'white-space:nowrap; transform:translate(6px,-4px); '
+                    'text-shadow:0 0 2px #fff, 0 0 2px #fff;">' + p["name"] + '</div>'
+                ),
+                icon_size=(0, 0),
+                icon_anchor=(0, 0),
+            ),
+        ).add_to(m)
+
+
+def _ship_div_icon(color_hex, heading):
+    """
+    畫一個會依航向旋轉的簡易船形圖標（三角箭頭造型），取代預設的地圖大頭針，
+    視覺上更像「船」，heading=0 朝北，跟 AIS 顯示習慣一致。
+    """
+    svg = (
+        f'<div style="width:24px; height:24px; transform:rotate({heading}deg); '
+        f'filter:drop-shadow(0 1px 1px rgba(0,0,0,0.35));">'
+        f'<svg viewBox="0 0 24 24" width="24" height="24">'
+        f'<path d="M12 1.5 L19 16 L12 12.5 L5 16 Z" '
+        f'fill="{color_hex}" stroke="#2d2d2d" stroke-width="1" stroke-linejoin="round"/>'
+        f'</svg></div>'
+    )
+    return folium.DivIcon(html=svg, icon_size=(24, 24), icon_anchor=(12, 12))
+
+
+def _tooltip_style(v):
+    """
+    決定船名標籤的顏色與原因，依優先序判斷：
+    1. 沒有配對到任何訂單 → 灰色（資料缺口，最需要注意）
+    2. 近五天待加油(APPROVED)紀錄 >= 10 筆 → 深橘色（高負載）
+    3. 航速趨近於 0（可能靠港/錨泊）→ 藍色
+    4. 其餘正常航行中 → 綠色
+    """
+    if not v.get("matched"):
+        return "#9e9e9e"
+
+    ready_count = v.get("ready_count", 0)
+    speed = v.get("speed", 0) or 0
+
+    if ready_count >= 10:
+        return "#e65100"
+    if speed < 0.5:
+        return "#1565c0"
+    return "#2e7d32"
 
 
 class EdgeTickOverlay(MacroElement):
@@ -488,6 +589,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     # 邊緣經緯度刻度：跟著 moveend / zoomend 即時重算位置
     EdgeTickOverlay().add_to(m)
 
+    # 主要港口／島國參考點
+    _add_major_ports(m)
+
     # 聚類設定 (MarkerCluster)
     marker_cluster = MarkerCluster(
         options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}
@@ -503,17 +607,15 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
         # ==========================================
-        # 📍 視覺標籤設定 (高負載 >= 10 用深橘色，一般用深灰)
+        # 📍 視覺標籤設定：沒有訂單 > 高負載(>=10) > 停船中(低速) > 正常航行
         # ==========================================
         ready_count = v.get('ready_count', 0)
-        marker_color = _MARKER_COLOR.get(v["status"], "blue")
-        
-        if ready_count >= 10:
-            # 深橘色標籤 + 船隻圖標 (FontAwesome)
-            tooltip_html = f"<div style='color:#e65100;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
-        else:
-            # 輕量化深灰色標籤 + 船隻圖標 (FontAwesome)
-            tooltip_html = f"<div style='color:#666;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
+        label_color = _tooltip_style(v)
+        tooltip_html = f"<div style='color:{label_color};'><i class='fa fa-ship'></i> {v['油輪']}</div>"
+
+        # 船舶 icon 顏色沿用訊號狀態（紅/橘/綠），跟標籤顏色是兩件獨立資訊：
+        # 標籤 = 業務狀態（有沒有訂單/是否高負載/是否在移動），icon = GPS 訊號健康度
+        icon_hex = _MARKER_HEX.get(v["status"], "#1e88e5")
 
         # Popup 詳細內容
         popup_html = f"""
@@ -535,7 +637,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             location=[v["lat"], v["map_lon"]],  
             tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
-            icon=folium.Icon(color=marker_color, icon="ship", prefix="fa"),
+            icon=_ship_div_icon(icon_hex, v.get("heading", 0) or 0),
         ).add_to(marker_cluster)
 
     map_state = st_folium(
@@ -587,6 +689,37 @@ def parse_ship_entries(target):
         imo = re.search(r'IMO:(\d+)', seg)
         res.append({"fv": fv.group(1).strip() if fv else "-", "imo": imo.group(1).strip() if imo else "-"})
     return res
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _compute_duplicate_pair_indices(display_df: pd.DataFrame) -> set:
+    """
+    找出主表格裡「同一油輪+IMO，APPROVED 到 COMPLETED 在 7 天內配對成功」的紀錄 index，
+    用來標橘色底色。原本這段是每次 Streamlit rerun 都要重新跑一次巢狀迴圈掃描全表，
+    改成 cache_data 之後，只要 display_df 內容沒變（同樣的篩選結果），
+    30 秒內重複 rerun 會直接吃快取，不用重算。
+    """
+    valid_dup_indices = set()
+    valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
+    valid_df = display_df[valid_imo_mask]
+
+    for (tanker, imo), group in valid_df.groupby(['油輪', 'IMO']):
+        approved_rows = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
+        completed_rows = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
+
+        if not approved_rows.empty and not completed_rows.empty:
+            for a_idx, a_row in approved_rows.iterrows():
+                for c_idx, c_row in completed_rows.iterrows():
+                    a_time = a_row['日期']
+                    c_time = c_row['日期']
+
+                    if pd.notnull(a_time) and pd.notnull(c_time):
+                        time_diff = c_time - a_time
+                        if pd.Timedelta(0) < time_diff <= pd.Timedelta(days=7):
+                            valid_dup_indices.add(a_idx)
+                            valid_dup_indices.add(c_idx)
+
+    return valid_dup_indices
+
 
 @st.cache_data(ttl=60)
 def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
@@ -951,25 +1084,7 @@ if not df.empty:
                 return "background-color: rgba(255, 243, 205, 0.3);"
             return ""
 
-        valid_dup_indices = set()
-        valid_imo_mask = ~display_df['IMO'].isin(['-', '', '(本次無資料)'])
-        valid_df = display_df[valid_imo_mask]
-        
-        for (tanker, imo), group in valid_df.groupby(['油輪', 'IMO']):
-            approved_rows = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
-            completed_rows = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
-            
-            if not approved_rows.empty and not completed_rows.empty:
-                for a_idx, a_row in approved_rows.iterrows():
-                    for c_idx, c_row in completed_rows.iterrows():
-                        a_time = a_row['日期']
-                        c_time = c_row['日期']
-                        
-                        if pd.notnull(a_time) and pd.notnull(c_time):
-                            time_diff = c_time - a_time
-                            if pd.Timedelta(0) < time_diff <= pd.Timedelta(days=7):
-                                valid_dup_indices.add(a_idx)
-                                valid_dup_indices.add(c_idx)
+        valid_dup_indices = _compute_duplicate_pair_indices(display_df)
 
         def style_duplicate_imo(s):
             return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
