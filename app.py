@@ -4,6 +4,9 @@ import pandas as pd
 import os, yaml, json, re, io
 from datetime import datetime
 
+import folium
+from streamlit_folium import st_folium
+
 # 建議將網頁預設為寬螢幕佈局
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
@@ -78,6 +81,207 @@ st.markdown("""
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
     </style>
     """, unsafe_allow_html=True)
+
+# ==========================================
+# 🗺️ 船隊地圖相關：常數與工具函式
+# ==========================================
+ARROW_HEADING = {
+    '→': 90, '↗': 45, '↑': 0, '↖': 315,
+    '←': 270, '↙': 225, '↓': 180, '↘': 135
+}
+
+SIGNAL_LIMIT_HOURS = 6
+
+# 你的 VMS Google Sheet 資訊
+VMS_SPREADSHEET_ID = "1wwFluz-H4-r7HRKya1AUZ_2KyZ6bVow_2v-TBqXj46c"
+VMS_VESSELDATA_GID = "1420495034"  # VesselData 分頁的 gid
+
+
+def _parse_custom_date(s):
+    """對應 GAS parseCustomDate()：格式 yyyyMMdd HH:mm"""
+    m = re.match(r'^(\d{4})(\d{2})(\d{2}) (\d{2}):(\d{2})$', str(s or "").strip())
+    if not m:
+        return None
+    y, mo, d, h, mi = map(int, m.groups())
+    try:
+        return datetime(y, mo, d, h, mi)
+    except ValueError:
+        return None
+
+
+def _parse_position(raw):
+    """對應 GAS parsePosition()：'lat,lon' 字串"""
+    parts = str(raw or "").split(',')
+    if len(parts) < 2:
+        return None
+    try:
+        return {"lat": float(parts[0].strip()), "lon": float(parts[1].strip())}
+    except ValueError:
+        return None
+
+
+def _parse_speed_field(raw):
+    """對應 GAS parseSpeedField()：箭頭符號 + 速度數字"""
+    s = str(raw or "").strip()
+    arrow = s[:1]
+    heading = ARROW_HEADING.get(arrow, 0)
+    digits = re.sub(r'[^\d.]', '', s)
+    speed = float(digits) if digits else 0.0
+    return {"speed": speed, "heading": heading}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_vessel_positions():
+    """
+    直接用公開的 CSV 匯出網址讀取 VesselData 分頁，
+    不需要任何 Google API 憑證。
+    前提：Google Sheet 共用設定為「知道連結的人都可以檢視」。
+    """
+    csv_url = (
+        f"https://docs.google.com/spreadsheets/d/{VMS_SPREADSHEET_ID}"
+        f"/export?format=csv&gid={VMS_VESSELDATA_GID}"
+    )
+    try:
+        raw = pd.read_csv(csv_url)
+    except Exception as e:
+        st.sidebar.error(f"⚠️ 無法讀取船位資料（VesselData）：{e}")
+        return pd.DataFrame()
+
+    now = datetime.now()
+    rows = []
+    for _, r in raw.iterrows():
+        vessel_name = str(r.iloc[0]).strip() if pd.notna(r.iloc[0]) else ""
+        if not vessel_name:
+            continue
+
+        last_signal = _parse_custom_date(r.iloc[1]) if len(r) > 1 else None
+        if not last_signal:
+            continue
+
+        pos = _parse_position(r.iloc[2]) if len(r) > 2 else None
+        speed_info = _parse_speed_field(r.iloc[3]) if len(r) > 3 else {"speed": 0, "heading": 0}
+        validity = str(r.iloc[5]) if len(r) > 5 and pd.notna(r.iloc[5]) else "0/6"
+        valid_count = int(validity.split('/')[0]) if '/' in validity and validity.split('/')[0].isdigit() else 0
+        remark = str(r.iloc[6]) if len(r) > 6 and pd.notna(r.iloc[6]) else ""
+
+        signal_hours = (now - last_signal).total_seconds() / 3600
+        no_signal = signal_hours > SIGNAL_LIMIT_HOURS
+        warning = (not no_signal) and valid_count <= 2
+
+        if no_signal:
+            status = "🔴 No Signal"
+        elif warning:
+            status = "🟡 Weak"
+        else:
+            status = "🟢 Normal"
+
+        rows.append({
+            "油輪": vessel_name,
+            "lat": pos["lat"] if pos else None,
+            "lon": pos["lon"] if pos else None,
+            "speed": speed_info["speed"],
+            "heading": speed_info["heading"],
+            "last_signal": last_signal,
+            "signal_hours": round(signal_hours, 1),
+            "validity": validity,
+            "remark": remark,
+            "no_signal": no_signal,
+            "warning": warning,
+            "status": status,
+        })
+
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
+    """把船位資料跟訂單資料 (df) 合併成摘要"""
+    if vessel_pos_df.empty:
+        return vessel_pos_df
+
+    summary_rows = []
+    for _, v in vessel_pos_df.iterrows():
+        name = v["油輪"]
+        vdf = df[df["油輪"] == name]
+
+        pending_count = int((vdf["狀態"] == "PENDING").sum())
+        approved_count = int(vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
+        completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
+        kyc_fail_count = int(vdf["狀態"].str.contains("KYC", case=False, na=False).sum())
+
+        latest = vdf.sort_values("日期", ascending=False).head(1)
+        latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
+        latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
+
+        row = v.to_dict()
+        row.update({
+            "pending_count": pending_count,
+            "approved_count": approved_count,
+            "completed_count": completed_count,
+            "kyc_fail_count": kyc_fail_count,
+            "total_orders": len(vdf),
+            "latest_subject": latest_subject,
+            "latest_date": latest_date,
+        })
+        summary_rows.append(row)
+
+    return pd.DataFrame(summary_rows)
+
+
+_MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
+
+
+def render_fleet_map(vessel_summary_df: pd.DataFrame):
+    """畫互動式 Folium 地圖"""
+    valid = vessel_summary_df.dropna(subset=["lat", "lon"]) if not vessel_summary_df.empty else vessel_summary_df
+
+    if valid is None or valid.empty:
+        st.info("目前沒有可顯示座標的船舶資料（VesselData 尚未同步或座標為空）。")
+        return None
+
+    center_lat = valid["lat"].mean()
+    center_lon = valid["lon"].mean()
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
+
+    for _, v in valid.iterrows():
+        color = _MARKER_COLOR.get(v["status"], "blue")
+        last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
+        latest_date_str = (
+            pd.to_datetime(v["latest_date"]).strftime("%m/%d %H:%M")
+            if pd.notnull(v.get("latest_date"))
+            else "-"
+        )
+
+        popup_html = f"""
+        <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
+            <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
+            狀態：{v['status']} ・ 速度 {v['speed']:.1f} kn<br>
+            最後訊號：{last_signal_str}（{v['signal_hours']:.1f} hr 前）<br>
+            <hr style="margin:6px 0;">
+            📋 待審 <b>{v.get('pending_count', 0)}</b> ・
+            ✅ 已核准 <b>{v.get('approved_count', 0)}</b> ・
+            🏁 已完成 <b>{v.get('completed_count', 0)}</b><br>
+            最新郵件（{latest_date_str}）：{v.get('latest_subject', '-')}
+        </div>
+        """
+
+        folium.Marker(
+            location=[v["lat"], v["lon"]],
+            tooltip=v["油輪"],
+            popup=folium.Popup(popup_html, max_width=280),
+            icon=folium.Icon(color=color, icon="ship", prefix="fa"),
+        ).add_to(m)
+
+    map_state = st_folium(
+        m,
+        height=460,
+        use_container_width=True,
+        key="fleet_map",
+        returned_objects=["last_object_clicked_tooltip"],
+    )
+    return map_state
+
 
 # --- 1. 讀取 Update Log ---
 def load_update_log():
@@ -413,6 +617,24 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
+# --- 船隊即時地圖 ---
+if not df.empty:
+    vessel_pos_df = load_vessel_positions()
+    vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
+
+    with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
+        map_state = render_fleet_map(vessel_summary_df)
+
+        # 點擊地圖上的船 → 連動下方表格篩選（設定 selectbox 的 key）
+        clicked_vessel = None
+        if map_state and map_state.get("last_object_clicked_tooltip"):
+            clicked_vessel = map_state["last_object_clicked_tooltip"]
+
+        if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
+            st.session_state["_last_clicked_vessel"] = clicked_vessel
+            st.session_state["tanker_filter"] = clicked_vessel
+            st.rerun()
+
 # 數據看板 (Metrics)
 log = load_update_log()
 if log:
@@ -437,7 +659,11 @@ if not df.empty:
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
-        sel_tanker = st.selectbox("🚢 篩選油輪", tankers)
+        if "tanker_filter" not in st.session_state:
+            st.session_state["tanker_filter"] = "全部"
+        if st.session_state["tanker_filter"] not in tankers:
+            st.session_state["tanker_filter"] = "全部"
+        sel_tanker = st.selectbox("🚢 篩選油輪", tankers, key="tanker_filter")
     with c2:
         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
