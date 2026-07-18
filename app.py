@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import os, yaml, json, re, io
+import os, yaml, json, re, io, html
 from datetime import datetime, timezone, timedelta
 
 import folium
@@ -296,7 +296,8 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             ]
             ready_count = int(ready_df['IMO'].nunique())
 
-        # 近期清單：IMO 去重 (保留最新一筆)，最多 10 筆
+        # 近期清單：IMO 去重 (保留最新一筆)，APPROVED(APPD) 優先排在前面，
+        # 同優先序再依日期新到舊排序，最多取 10 筆
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
             # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
@@ -305,7 +306,12 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                .replace("-", None)
                .fillna(recent_active.index.to_series())
              )
-            recent_orders = recent_active.drop_duplicates(subset=['temp_id'], keep='first').head(10)[["日期", "狀態", "船名"]].to_dict("records")
+            deduped = recent_active.drop_duplicates(subset=['temp_id'], keep='first').copy()
+            deduped["_priority"] = deduped["狀態"].apply(
+                lambda s: 0 if "APPROVED" in str(s).upper() else 1
+            )
+            deduped = deduped.sort_values(["_priority", "日期"], ascending=[True, False])
+            recent_orders = deduped.head(10)[["日期", "狀態", "船名"]].to_dict("records")
         else:
             recent_orders = []
 
@@ -538,13 +544,14 @@ def _build_recent_orders_html(recent_orders, vessel_name):
 
     def _item(o):
         status = o.get("狀態", "-") or "-"
+        display_status = "APPD" if "APPROVED" in str(status).upper() else status
         ship = o.get("船名", "-") or "-"
         dt = o.get("日期", pd.NaT)
         dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else ""
         dt_html = f"<span style='color:#888; font-size:11px;'>({dt_str})</span>" if dt_str else ""
         return (
             f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0; font-size:12px;">'
-            f'{_status_emoji(status)} <b>{status}</b> {dt_html} ・ {ship}</div>'
+            f'{_status_emoji(status)} <b>{display_status}</b> {dt_html} ・ {ship}</div>'
         )
 
     items = [_item(o) for o in recent_orders]
@@ -563,6 +570,36 @@ def _build_recent_orders_html(recent_orders, vessel_name):
 
     html += "</div>"
     return html
+
+
+def _format_coord(lat, lon):
+    """座標改用南北東西方向字母表示，不使用負數（例：-18.5 -> 18.5000°S）"""
+    lat_dir = "N" if lat >= 0 else "S"
+    lon_dir = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.4f}°{lat_dir}, {abs(lon):.4f}°{lon_dir}"
+
+
+def _build_copy_text(v, ready_count, coord_str, last_signal_str):
+    """組出「複製船舶資訊」按鈕要複製的純文字內容"""
+    lines = [
+        f"🚢 {v['油輪']}",
+        f"狀態：{v['status']}",
+        f"POS：{coord_str}",
+        f"HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn",
+        f"LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）",
+        f"已安排加油：{ready_count} ・ 已完成：{v.get('completed_count', 0)}",
+    ]
+    recent_orders = v.get("recent_orders", []) or []
+    if recent_orders:
+        lines.append("近期訂單：")
+        for o in recent_orders:
+            status = o.get("狀態", "-") or "-"
+            display_status = "APPD" if "APPROVED" in str(status).upper() else status
+            ship = o.get("船名", "-") or "-"
+            dt = o.get("日期", pd.NaT)
+            dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else "-"
+            lines.append(f"  {display_status} ({dt_str}) - {ship}")
+    return "\n".join(lines)
 
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
@@ -617,19 +654,49 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         # 標籤 = 業務狀態（有沒有訂單/是否高負載/是否在移動），icon = GPS 訊號健康度
         icon_hex = _MARKER_HEX.get(v["status"], "#1e88e5")
 
-        # Popup 詳細內容
+        coord_str = _format_coord(v["lat"], v["lon"])
+        copy_text = _build_copy_text(v, ready_count, coord_str, last_signal_str)
+        copy_text_attr = html.escape(copy_text, quote=True)
+
+        copy_btn_html = (
+            f'<button type="button" data-copytext="{copy_text_attr}" '
+            'style="margin-top:6px; width:100%; padding:4px 0; font-size:11px; '
+            'color:#1a73e8; background:#f1f6fe; border:1px solid #cfe0fb; '
+            'border-radius:4px; cursor:pointer;" '
+            "onclick=\""
+            "var t=this.getAttribute('data-copytext');"
+            "var done=function(){ this.textContent='✅ 已複製'; var b=this; setTimeout(function(){ b.textContent='📋 複製船舶資訊'; }, 1500); }.bind(this);"
+            "if(navigator.clipboard && navigator.clipboard.writeText){"
+            "navigator.clipboard.writeText(t).then(done).catch(function(){"
+            "var ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';"
+            "document.body.appendChild(ta); ta.focus(); ta.select();"
+            "try{ document.execCommand('copy'); }catch(e){}"
+            "document.body.removeChild(ta);"
+            "});"
+            "}else{"
+            "var ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';"
+            "document.body.appendChild(ta); ta.focus(); ta.select();"
+            "try{ document.execCommand('copy'); }catch(e){}"
+            "document.body.removeChild(ta);"
+            "}"
+            "this.textContent='✅ 已複製'; var b=this; setTimeout(function(){ b.textContent='📋 複製船舶資訊'; }, 1500);"
+            '">📋 複製船舶資訊</button>'
+        )
+
+        # Popup 詳細內容（除了狀態保留 icon，其餘欄位改用精簡標籤；座標用南北東西表示）
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
             狀態：{v['status']}<br>
-            座標：{v['lat']:.4f}, {v['lon']:.4f}<br>
-            動態：航向 {v['heading']:.0f}° ・ 速度 {v['speed']:.1f} kn<br>
-            最後訊號：{last_signal_str}（{v['signal_hours']:.1f} hr 前）<br>
+            POS：{coord_str}<br>
+            HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn<br>
+            LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）<br>
             <hr style="margin:6px 0;">
-            ✅ 準備加油 <b>{ready_count}</b> ・
+            ✅ 已安排加油 <b>{ready_count}</b> ・
             🏁 已完成 <b>{v.get('completed_count', 0)}</b>
             {recent_orders_html}
             {match_line}
+            {copy_btn_html}
         </div>
         """
 
