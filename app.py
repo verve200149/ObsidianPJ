@@ -237,16 +237,14 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         else: vdf = df[df["油輪"] == v["油輪"]]
 
         matched = not vdf.empty
-        # 已完成包含所有的 COMPLETED
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
-
+        
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
-        matched_name = vdf["油輪"].iloc[0] if matched else None
 
         # ==========================================
-        # 📌 排除已配對結案的紀錄，計算出「準備加油」與近期清單
+        # 1. 核心邏輯：過濾掉「已完成」的對應組 (IMO 配對排除)
         # ==========================================
         paired_indices = set()
         if 'IMO' in vdf.columns:
@@ -257,39 +255,42 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                 if not approves.empty and not completes.empty:
                     for a_idx, a_row in approves.iterrows():
                         for c_idx, c_row in completes.iterrows():
-                            a_time, c_time = a_row['日期'], c_row['日期']
-                            if pd.notnull(a_time) and pd.notnull(c_time):
-                                diff = c_time - a_time
+                            if pd.notnull(a_row['日期']) and pd.notnull(c_row['日期']):
+                                diff = c_row['日期'] - a_row['日期']
                                 if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
                                     paired_indices.add(a_idx)
                                     paired_indices.add(c_idx)
 
         active_vdf = vdf.drop(index=list(paired_indices))
 
-        # 抓「最新一筆的日期」往前推 5 天內的『未結案』紀錄
-        recent_sorted = active_vdf.sort_values("日期", ascending=False)
-        if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
-            cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=5)
-            recent_active_vdf = active_vdf[active_vdf["日期"] >= cutoff]
-            recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
-        else:
-            recent_active_vdf = active_vdf.iloc[0:0]
-
-        # 「準備加油」：限縮在 5 天內、必須為有效 IMO，且排除重複的 IMO
-        if not recent_active_vdf.empty and 'IMO' in recent_active_vdf.columns:
-            recent_valid_imo_df = recent_active_vdf[~recent_active_vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-            ready_df = recent_valid_imo_df[recent_valid_imo_df["狀態"].str.contains("APPROVED", case=False, na=False)]
+        # ==========================================
+        # 2. 準備加油與近期清單計算 (限近五天)
+        # ==========================================
+        cutoff = datetime.now(TAIPEI_TZ) - pd.Timedelta(days=5)
+        recent_active = active_vdf[active_vdf["日期"] >= cutoff].copy()
+        
+        # 準備加油：排除無效 IMO，去重後的 APPROVED 數量
+        ready_count = 0
+        if not recent_active.empty and 'IMO' in recent_active.columns:
+            ready_df = recent_active[
+                (~recent_active['IMO'].isin(['-', '', '(本次無資料)'])) & 
+                (recent_active["狀態"].str.contains("APPROVED", case=False, na=False))
+            ]
             ready_count = int(ready_df['IMO'].nunique())
-        else:
-            ready_count = 0
 
-        # 清單：保留最多 10 筆顯示於 Popup
-        recent_orders = recent_sorted.head(10)[["日期", "狀態", "船名"]].to_dict("records") if not recent_sorted.empty else []
+        # 近期清單：IMO 去重 (保留最新一筆)，最多 10 筆
+        if not recent_active.empty:
+            recent_active = recent_active.sort_values("日期", ascending=False)
+            # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
+            recent_active['temp_id'] = recent_active['IMO'].replace('-', None).fillna(recent_active.index.to_series())
+            recent_orders = recent_active.drop_duplicates(subset=['temp_id'], keep='first').head(10)[["日期", "狀態", "船名"]].to_dict("records")
+        else:
+            recent_orders = []
 
         row = v.to_dict()
         row.update({
             "matched": matched,
-            "matched_油輪": matched_name,
+            "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
             "ready_count": ready_count,
             "completed_count": completed_count,
             "total_orders": len(vdf),
@@ -298,6 +299,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "recent_orders": recent_orders,
         })
         summary_rows.append(row)
+        
     return pd.DataFrame(summary_rows)
 
 
