@@ -245,6 +245,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
         # 排除結案紀錄
         paired_indices = set()
+        
         if 'IMO' in vdf.columns:
             valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
             for imo, group in valid_imo_df.groupby('IMO'):
@@ -258,7 +259,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                                 if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
                                     paired_indices.add(a_idx)
                                     paired_indices.add(c_idx)
-        
+        active_vdf = vdf.drop(index=list(paired_indices)).copy()
 
         active_vdf["日期"] = pd.to_datetime(active_vdf["日期"], errors='coerce')
         valid_date_vdf = active_vdf.dropna(subset=["日期"])
@@ -280,7 +281,11 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
             # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
-            recent_active['temp_id'] = recent_active['IMO'].replace('-', None).fillna(recent_active.index.to_series())
+            recent_active.loc[:, "temp_id"] = (
+            recent_active["IMO"]
+               .replace("-", None)
+               .fillna(recent_active.index.to_series())
+             )
             recent_orders = recent_active.drop_duplicates(subset=['temp_id'], keep='first').head(10)[["日期", "狀態", "船名"]].to_dict("records")
         else:
             recent_orders = []
