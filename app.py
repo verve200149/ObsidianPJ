@@ -230,10 +230,29 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
         matched_name = vdf["油輪"].iloc[0] if matched else None
 
-        # 最近 5 筆訂單紀錄（狀態 + 船名），給地圖 popup 顯示用
-        # 最近訂單紀錄（狀態 + 船名），給地圖 popup 顯示用：
-        # 抓「最新一筆的日期」往前推 2 天內的所有紀錄
-        recent_sorted = vdf.sort_values("日期", ascending=False)
+        # ==========================================
+        # 📌 排除已配對結案的紀錄，保留尚未走完流程的訂單
+        # ==========================================
+        paired_indices = set()
+        valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+        for imo, group in valid_imo_df.groupby('IMO'):
+            approves = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
+            completes = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
+            if not approves.empty and not completes.empty:
+                for a_idx, a_row in approves.iterrows():
+                    for c_idx, c_row in completes.iterrows():
+                        a_time, c_time = a_row['日期'], c_row['日期']
+                        if pd.notnull(a_time) and pd.notnull(c_time):
+                            diff = c_time - a_time
+                            if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
+                                # 若配對成功，則將 APPROVED 及 COMPLETED 從待處理清單中排除
+                                paired_indices.add(a_idx)
+                                paired_indices.add(c_idx)
+
+        active_vdf = vdf.drop(index=list(paired_indices))
+
+        # 抓「最新一筆的日期」往前推 2 天內的『未結案』紀錄
+        recent_sorted = active_vdf.sort_values("日期", ascending=False)
         if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
             cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=2)
             recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
@@ -263,9 +282,6 @@ class EdgeTickOverlay(MacroElement):
     """
     在地圖容器的四個邊緣顯示動態經緯度刻度，跟著 moveend / zoomend
     即時重新計算像素位置，效果類似固定在畫面邊框的座標軸。
-
-    完全是內嵌的自寫 JS，不載入任何外部 CDN／套件，
-    所以不會有外部資源在 streamlit-folium 的 iframe 環境下載入失敗的問題。
     """
     def __init__(self):
         super().__init__()
@@ -374,11 +390,10 @@ def _status_emoji(status):
     return "•"
 
 
-def _build_recent_orders_html(recent_orders):
-    """組出 popup 裡「近期訂單」的清單 HTML：預設顯示前 3 筆，
-    其餘（最近兩天內的紀錄）用 <details> 收合起來，點「顯示更多」才展開。"""
+def _build_recent_orders_html(recent_orders, vessel_name):
+    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示，取代 details 標籤"""
     if not recent_orders:
-        return '<div style="color:#999; margin-top:2px;">尚無訂單紀錄</div>'
+        return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
 
     def _item(o):
         status = o.get("狀態", "-") or "-"
@@ -388,17 +403,21 @@ def _build_recent_orders_html(recent_orders):
             f'{_status_emoji(status)} <b>{status}</b> ・ {ship}</div>'
         )
 
-    MAX_TOTAL = 30  # 安全上限，避免單一船隻兩天內異常大量紀錄把 popup 撐爆
+    MAX_TOTAL = 30  
     items = [_item(o) for o in recent_orders[:MAX_TOTAL]]
     html = '<div style="margin-top:4px;">' + "".join(items[:3])
 
     if len(items) > 3:
         rest_html = "".join(items[3:])
+        # 產生安全的 HTML ID，避免特殊字元導致 JS 失效
+        safe_id = re.sub(r'\W+', '_', str(vessel_name))
+        
+        # 這裡將額外的內容預設隱藏，點擊按鈕後將其顯示，同時將按鈕本身隱藏
         html += (
-            f'<details style="margin-top:2px;">'
-            f'<summary style="cursor:pointer; color:#1a73e8; font-size:11px; '
-            f'outline:none; -webkit-tap-highlight-color:transparent; list-style:none;">'
-            f'顯示更多（近兩天共 {len(recent_orders)} 筆）</summary>{rest_html}</details>'
+            f'<div id="extra_{safe_id}" style="display:none;">{rest_html}</div>'
+            f'<div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" '
+            f'onclick="document.getElementById(\'extra_{safe_id}\').style.display=\'block\'; this.style.display=\'none\';">'
+            f'▼ 顯示更多未結案訂單（共 {len(recent_orders)} 筆）</div>'
         )
 
     html += "</div>"
@@ -421,10 +440,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
     # 繪製經緯網格線 (純 Python 實現，極度穩定)
-    # 畫緯線 (橫線) 每 15 度一條
     for lat_line in range(-75, 76, 15):
         folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
-    # 畫經線 (直線) 每 30 度一條
     for lon_line in range(0, 361, 30):
         folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
 
@@ -439,10 +456,15 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
         last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
+        latest_date_str = (
+            pd.to_datetime(v["latest_date"]).strftime("%m/%d %H:%M")
+            if pd.notnull(v.get("latest_date")) else "-"
+        )
         match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
-        recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []))
+        
+        # 將船名傳入以產生獨立的 Popup 控制按鈕 ID
+        recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
-        # 詳細資訊 Popup
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
@@ -466,7 +488,14 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
         ).add_to(marker_cluster)
 
-    return st_folium(m, height=460, use_container_width=True, key="fleet_map")
+    map_state = st_folium(
+        m,
+        height=460,
+        use_container_width=True,
+        key="fleet_map",
+        returned_objects=["last_object_clicked_tooltip"],
+    )
+    return map_state
 
 
 # --- 1. 讀取 Update Log ---
