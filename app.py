@@ -2,7 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import os, yaml, json, re, io
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import folium
 from streamlit_folium import st_folium
@@ -92,36 +92,28 @@ ARROW_HEADING = {
 
 SIGNAL_LIMIT_HOURS = 6
 
-# 你的 VMS Google Sheet 資訊
+TAIPEI_TZ = timezone(timedelta(hours=8))
+
 VMS_SPREADSHEET_ID = "1wwFluz-H4-r7HRKya1AUZ_2KyZ6bVow_2v-TBqXj46c"
-VMS_VESSELDATA_GID = "1420495034"  # VesselData 分頁的 gid
+VMS_VESSELDATA_GID = "1420495034"  
 
 
 def _parse_custom_date(s):
-    """對應 GAS parseCustomDate()：格式 yyyyMMdd HH:mm"""
     m = re.match(r'^(\d{4})(\d{2})(\d{2}) (\d{2}):(\d{2})$', str(s or "").strip())
-    if not m:
-        return None
+    if not m: return None
     y, mo, d, h, mi = map(int, m.groups())
-    try:
-        return datetime(y, mo, d, h, mi)
-    except ValueError:
-        return None
+    try: return datetime(y, mo, d, h, mi, tzinfo=TAIPEI_TZ)
+    except ValueError: return None
 
 
 def _parse_position(raw):
-    """對應 GAS parsePosition()：'lat,lon' 字串"""
     parts = str(raw or "").split(',')
-    if len(parts) < 2:
-        return None
-    try:
-        return {"lat": float(parts[0].strip()), "lon": float(parts[1].strip())}
-    except ValueError:
-        return None
+    if len(parts) < 2: return None
+    try: return {"lat": float(parts[0].strip()), "lon": float(parts[1].strip())}
+    except ValueError: return None
 
 
 def _parse_speed_field(raw):
-    """對應 GAS parseSpeedField()：箭頭符號 + 速度數字"""
     s = str(raw or "").strip()
     arrow = s[:1]
     heading = ARROW_HEADING.get(arrow, 0)
@@ -131,31 +123,17 @@ def _parse_speed_field(raw):
 
 
 def _find_column(columns, candidates):
-    """
-    依「標題文字」動態找欄位，不用固定欄位位置。
-    candidates 是一組候選關鍵字（小寫），完全比對優先，找不到再用包含比對。
-    """
     normalized = {str(c).strip().lower(): c for c in columns}
     for cand in candidates:
-        if cand in normalized:
-            return normalized[cand]
+        if cand in normalized: return normalized[cand]
     for col_lower, col_orig in normalized.items():
         for cand in candidates:
-            if cand in col_lower:
-                return col_orig
+            if cand in col_lower: return col_orig
     return None
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_vessel_positions():
-    """
-    直接用公開的 CSV 匯出網址讀取 VesselData 分頁，
-    不需要任何 Google API 憑證。
-    前提：Google Sheet 共用設定為「知道連結的人都可以檢視」。
-
-    欄位一律用「標題文字」動態尋找（而不是固定欄位位置），
-    這樣即使之後欄位順序調整也不會讀錯。
-    """
     csv_url = (
         f"https://docs.google.com/spreadsheets/d/{VMS_SPREADSHEET_ID}"
         f"/export?format=csv&gid={VMS_VESSELDATA_GID}"
@@ -175,21 +153,16 @@ def load_vessel_positions():
     col_email = _find_column(raw.columns, ["email", "e-mail", "mail"])
 
     if col_name is None or col_last_signal is None:
-        st.sidebar.error("⚠️ VesselData 找不到「Vessel Name」或「Last Signal」標題欄位，請檢查表頭文字。")
         return pd.DataFrame()
-    if col_email is None:
-        st.sidebar.warning("⚠️ VesselData 找不到「Email」標題欄位，將無法跟郵件訂單資料配對。")
 
-    now = datetime.now()
+    now = datetime.now(TAIPEI_TZ)
     rows = []
     for _, r in raw.iterrows():
         vessel_name = str(r[col_name]).strip() if pd.notna(r[col_name]) else ""
-        if not vessel_name:
-            continue
+        if not vessel_name: continue
 
         last_signal = _parse_custom_date(r[col_last_signal])
-        if not last_signal:
-            continue
+        if not last_signal: continue
 
         pos = _parse_position(r[col_location]) if col_location and pd.notna(r[col_location]) else None
         speed_info = _parse_speed_field(r[col_speed]) if col_speed and pd.notna(r[col_speed]) else {"speed": 0, "heading": 0}
@@ -197,8 +170,6 @@ def load_vessel_positions():
         valid_count = int(validity.split('/')[0]) if '/' in validity and validity.split('/')[0].isdigit() else 0
         remark = str(r[col_remark]) if col_remark and pd.notna(r[col_remark]) else ""
 
-        # 從 Email 欄位取出「@ 前面」的帳號名稱，當作跟郵件資料配對的 key
-        # （data_John 解析出來的「油輪」欄位本身就是 email 帳號名稱）
         email_raw = str(r[col_email]).strip().lower() if col_email and pd.notna(r[col_email]) else ""
         email_local = email_raw.split('@')[0].strip() if '@' in email_raw else email_raw
 
@@ -206,12 +177,9 @@ def load_vessel_positions():
         no_signal = signal_hours > SIGNAL_LIMIT_HOURS
         warning = (not no_signal) and valid_count <= 2
 
-        if no_signal:
-            status = "🔴 No Signal"
-        elif warning:
-            status = "🟡 Weak"
-        else:
-            status = "🟢 Normal"
+        if no_signal: status = "🔴 No Signal"
+        elif warning: status = "🟡 Weak"
+        else: status = "🟢 Normal"
 
         rows.append({
             "油輪": vessel_name,
@@ -229,37 +197,21 @@ def load_vessel_positions():
             "warning": warning,
             "status": status,
         })
-
     return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    把船位資料跟訂單資料 (df) 合併成摘要。
-
-    配對邏輯：VesselData 的「Vessel Name」(例：ANGEL 101) 跟 data_John
-    解析出來的「油輪」欄位 (例：angel101，來自郵件寄件位址的帳號名稱)
-    文字格式對不起來，不能直接比對名字。改用 Email 帳號名稱（@ 前面
-    那段，忽略大小寫/空白）當配對鍵，因為兩邊本質上是同一個帳號名稱。
-    """
-    if vessel_pos_df.empty:
-        return vessel_pos_df
-
+    if vessel_pos_df.empty: return vessel_pos_df
     df_key = df["油輪"].astype(str).str.strip().str.lower()
-
     summary_rows = []
+    
     for _, v in vessel_pos_df.iterrows():
         email_local = str(v.get("email_local", "")).strip().lower()
-
-        if email_local:
-            vdf = df[df_key == email_local]
-        else:
-            # Email 欄位沒抓到資料時，退回用船名文字比對（多半配不到，僅作保底）
-            vdf = df[df["油輪"] == v["油輪"]]
+        if email_local: vdf = df[df_key == email_local]
+        else: vdf = df[df["油輪"] == v["油輪"]]
 
         matched = not vdf.empty
-
         pending_count = int((vdf["狀態"] == "PENDING").sum())
         approved_count = int(vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
@@ -268,9 +220,6 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
-
-        # 配對成功時，取郵件資料裡實際使用的「油輪」寫法，
-        # 讓地圖點擊後可以正確對到下方篩選器的選項
         matched_name = vdf["油輪"].iloc[0] if matched else None
 
         row = v.to_dict()
@@ -286,40 +235,32 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "latest_date": latest_date,
         })
         summary_rows.append(row)
-
     return pd.DataFrame(summary_rows)
 
 
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 
-
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
-    """畫互動式 Folium 地圖"""
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]) if not vessel_summary_df.empty else vessel_summary_df
-
     if valid is None or valid.empty:
-        st.info("目前沒有可顯示座標的船舶資料（VesselData 尚未同步或座標為空）。")
+        st.info("目前沒有可顯示座標的船舶資料。")
         return None
 
     center_lat = valid["lat"].mean()
     center_lon = valid["lon"].mean()
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
+    # 設定 min_zoom 與 tiles=None，並單獨加入圖層，並開啟 no_wrap，避免地圖重複
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=4, min_zoom=3, max_bounds=True, tiles=None)
+    folium.TileLayer('CartoDB positron', no_wrap=True).add_to(m)
 
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
         last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
         latest_date_str = (
             pd.to_datetime(v["latest_date"]).strftime("%m/%d %H:%M")
-            if pd.notnull(v.get("latest_date"))
-            else "-"
+            if pd.notnull(v.get("latest_date")) else "-"
         )
-
-        match_line = (
-            ""
-            if v.get("matched")
-            else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料（請確認 Email 帳號名稱）</div>'
-        )
+        match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
 
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
@@ -335,9 +276,10 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         </div>
         """
 
+        # 將 tooltip 設為 permanent=True，無需點擊即會直接顯示在標記旁
         folium.Marker(
             location=[v["lat"], v["lon"]],
-            tooltip=v["油輪"],
+            tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
         ).add_to(m)
@@ -358,8 +300,7 @@ def load_update_log():
         try:
             with open('update_log.json', 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
-            return None
+        except: return None
     return None
 
 # --- 2. 讀取 Kingdee JSON ---
@@ -376,8 +317,7 @@ ship_map = load_ship_map()
 
 # --- 3. 解析工具 ---
 def clean_mail_field(raw):
-    if not raw:
-        return ""
+    if not raw: return ""
     raw = str(raw)
     raw = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', raw)
     return raw.strip()
@@ -435,33 +375,24 @@ def load_all_data():
     rows = []
     parse_errors = []
     DATA_DIR = 'data_John'
-    if not os.path.exists(DATA_DIR):
-        return pd.DataFrame(rows), parse_errors
+    if not os.path.exists(DATA_DIR): return pd.DataFrame(rows), parse_errors
         
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
         for file in files:
-            if not (file.endswith('.md') and file not in EXCLUDE_FILES):
-                continue
+            if not (file.endswith('.md') and file not in EXCLUDE_FILES): continue
             fpath = os.path.join(root, file)
             try:
                 with open(fpath, 'r', encoding='utf-8') as f:
                     raw_text = f.read()
 
-                if not raw_text.startswith('---'):
-                    parse_errors.append((fpath, "找不到 YAML frontmatter (檔案未以 --- 開頭)"))
-                    continue
-
+                if not raw_text.startswith('---'): continue
                 parts = raw_text.split('---')
-                if len(parts) < 3:
-                    parse_errors.append((fpath, "YAML frontmatter 格式不完整 (--- 數量不足)"))
-                    continue
+                if len(parts) < 3: continue
 
                 fm = yaml.safe_load(parts[1])
-                if not fm:
-                    parse_errors.append((fpath, "YAML 解析結果為空"))
-                    continue
+                if not fm: continue
 
                 body = '---'.join(parts[2:]).strip()
                 ships = parse_ship_entries(fm.get('target', ''))
@@ -619,8 +550,7 @@ def apply_mobile_filter_layout():
     """
     components.html(js, height=0, width=0)
 
-# --- 6. 滾動時自動收折的提示框 (用瀏覽器 sessionStorage 記住「已收折」狀態，
-#         只有真正重新整理網頁才會恢復顯示，Streamlit 互動重跑不會讓它再跳出來) ---
+# --- 6. 滾動時或數秒後自動收折的提示框 ---
 def apply_scroll_dismiss_tip(tip_id: str):
     js = f"""
     <script>
@@ -655,6 +585,8 @@ def apply_scroll_dismiss_tip(tip_id: str):
             }} catch (e) {{}}
 
             let dismissed = false;
+            
+            // 滾動觸發隱藏
             function onScroll() {{
                 if (dismissed) return;
                 if (win.scrollY > 40) {{
@@ -665,6 +597,16 @@ def apply_scroll_dismiss_tip(tip_id: str):
                 }}
             }}
             win.addEventListener('scroll', onScroll, {{ passive: true }});
+            
+            // 5秒後自動隱藏
+            setTimeout(() => {{
+                if (!dismissed) {{
+                    dismissed = true;
+                    hideTip();
+                    try {{ win.sessionStorage.setItem(dismissedKey, '1'); }} catch (e) {{}}
+                    win.removeEventListener('scroll', onScroll);
+                }}
+            }}, 5000);
         }}
         setTimeout(init, 100);
     }})();
@@ -686,31 +628,6 @@ if parse_errors:
             st.write(f"`{fpath}`")
             st.caption(err)
 
-# --- 船隊即時地圖 ---
-if not df.empty:
-    vessel_pos_df = load_vessel_positions()
-    vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
-
-    with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
-        map_state = render_fleet_map(vessel_summary_df)
-
-        # 點擊地圖上的船 → 連動下方表格篩選（設定 selectbox 的 key）
-        clicked_vessel = None
-        if map_state and map_state.get("last_object_clicked_tooltip"):
-            clicked_vessel = map_state["last_object_clicked_tooltip"]
-
-        if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
-            st.session_state["_last_clicked_vessel"] = clicked_vessel
-
-            # 用配對結果去對應下方表格「油輪」篩選器實際使用的寫法
-            match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
-            if not match_row.empty and match_row["matched"].iloc[0]:
-                st.session_state["tanker_filter"] = match_row["matched_油輪"].iloc[0]
-            else:
-                st.session_state["tanker_filter"] = "全部"
-                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件（Email 帳號名稱對不起來）")
-            st.rerun()
-
 # 數據看板 (Metrics)
 log = load_update_log()
 if log:
@@ -730,6 +647,10 @@ if log:
         col_m4.metric("⏱️ 最後同步時間", update_time)
 
 if not df.empty:
+    # 載入地圖船舶資料
+    vessel_pos_df = load_vessel_positions()
+    vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
+
     # 頂部篩選器
     st.markdown('<div id="mobile-filter-container">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -763,6 +684,9 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
+    # ===============================================
+    # 📌 提示詞區塊與地圖顯示區（移動至原提示詞位置）
+    # ===============================================
     st.markdown('''
     <div id="scroll-tip" style="
         background-color:#1a3a5c;border:1px solid #2c5a8a;border-radius:6px;
@@ -773,6 +697,29 @@ if not df.empty:
     </div>
     ''', unsafe_allow_html=True)
     apply_scroll_dismiss_tip("scroll-tip")
+
+    # --- 船隊即時地圖 ---
+    with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
+        map_state = render_fleet_map(vessel_summary_df)
+
+        # 點擊地圖上的船 → 連動下方表格篩選（設定 selectbox 的 key）
+        clicked_vessel = None
+        if map_state and map_state.get("last_object_clicked_tooltip"):
+            # 取出原本被加上 <b> 標籤的名稱 (因 permanent tooltip 會連同 HTML 一起捕捉)
+            clicked_html = map_state["last_object_clicked_tooltip"]
+            clicked_vessel = clicked_html.replace('<b>', '').replace('</b>', '').strip()
+
+        if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
+            st.session_state["_last_clicked_vessel"] = clicked_vessel
+
+            match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
+            if not match_row.empty and match_row["matched"].iloc[0]:
+                st.session_state["tanker_filter"] = match_row["matched_油輪"].iloc[0]
+            else:
+                st.session_state["tanker_filter"] = "全部"
+                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件（Email 帳號名稱對不起來）")
+            st.rerun()
+    # ===============================================
 
     DF_KEY = "email_table"
     if "sel_seq" not in st.session_state:
