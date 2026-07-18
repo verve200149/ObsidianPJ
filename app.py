@@ -5,8 +5,16 @@ import os, yaml, json, re, io
 from datetime import datetime, timezone, timedelta
 
 import folium
-from folium.plugins import Graticule
+from folium.plugins import Graticule, MarkerCluster
 from streamlit_folium import st_folium
+
+# ==========================================
+# 🛡️ 維護建議：
+# 由於腳本使用了自定義 JS 操作 DOM (排版分割與手機版優化)，
+# 強烈建議在部署的 requirements.txt 中綁定目前的 Streamlit 版本，
+# 例如: streamlit==1.36.0 (或您當前使用的版本)，
+# 以避免未來官方更新 UI 結構時導致排版失效。
+# ==========================================
 
 # 建議將網頁預設為寬螢幕佈局
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
@@ -23,7 +31,7 @@ st.markdown("""
     .row_heading.level0 {display:none}
     .blank {display:none}
     
-    /* 右側郵件閱讀器的精美樣式 */
+    /* 右側郵件閱讀器的精美樣式 (保留白底黑字以求最佳閱讀性) */
     .email-pane { 
         background-color: #ffffff; 
         color: #333333; 
@@ -92,7 +100,6 @@ ARROW_HEADING = {
 }
 
 SIGNAL_LIMIT_HOURS = 6
-
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
 VMS_SPREADSHEET_ID = "1wwFluz-H4-r7HRKya1AUZ_2KyZ6bVow_2v-TBqXj46c"
@@ -255,10 +262,16 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
-    # ==========================================
-    # 🌐 疊加經緯度網格線 (Graticule)
-    # ==========================================
+    # 疊加經緯度網格線
     Graticule(color="#d0d0d0", weight=0.8, opacity=0.5).add_to(m)
+
+    # ==========================================
+    # 聚類顯示：防重疊並提升渲染效能
+    # ==========================================
+    marker_cluster = MarkerCluster(
+        # 可自訂選項，讓 Cluster 的外觀更符合系統
+        options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}
+    ).add_to(m)
 
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
@@ -290,7 +303,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
-        ).add_to(m)
+        ).add_to(marker_cluster)  # 將船隻加進群組中，而非直接加在地圖上
 
     map_state = st_folium(
         m,
@@ -665,8 +678,13 @@ if not df.empty:
             st.rerun()
 
     # ===============================================
+    # 表格選取與重置邏輯
+    # ===============================================
+    if "df_key_counter" not in st.session_state:
+        st.session_state.df_key_counter = 0
+    # 藉由動態修改 Key 來達到「清除表格所有勾選」的效果
+    DF_KEY = f"email_table_{st.session_state.df_key_counter}"
 
-    DF_KEY = "email_table"
     if "sel_seq" not in st.session_state:
         st.session_state.sel_seq = {}   
     if "sel_counter" not in st.session_state:
@@ -742,7 +760,7 @@ if not df.empty:
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
-        exp_c1, exp_c2 = st.columns(2)
+        exp_c1, exp_c2, exp_c3 = st.columns([1, 1, 1])
         with exp_c1:
             st.download_button(
                 f"📊 匯出目前篩選 ({len(display_df)} 筆)", 
@@ -752,11 +770,18 @@ if not df.empty:
             )
         with exp_c2:
             st.download_button(
-                f"🗂️ 匯出全部資料 (依油輪分頁，{df['油輪'].nunique()} 個分頁)",
+                f"🗂️ 匯出全部資料",
                 build_tanker_excel(df),
                 "ship_report_by_tanker.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        # 加入「關閉預覽」按鈕
+        with exp_c3:
+            if guess_has_selection:
+                if st.button("❌ 關閉預覽 (清除選取)", use_container_width=True):
+                    st.session_state.sel_seq = {}
+                    st.session_state.df_key_counter += 1
+                    st.rerun()
 
     # === 更新序號並計算預覽項目 ===
     raw_rows = event.get("selection", {}).get("rows", [])
