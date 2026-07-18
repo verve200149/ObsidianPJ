@@ -5,6 +5,7 @@ import os, yaml, json, re, io
 from datetime import datetime, timezone, timedelta
 
 import folium
+from folium.plugins import Graticule
 from streamlit_folium import st_folium
 
 # 建議將網頁預設為寬螢幕佈局
@@ -241,23 +242,23 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
-    # 複製 DataFrame 以防更動到 cache
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
     if valid.empty:
         st.info("目前沒有可顯示座標的船舶資料。")
         return None
 
-    # ==========================================
-    # 🌎 核心解法：跨太平洋日期變更線處理 (Rotate Lon)
-    # 將所有位於西經的座標 (負數) 加上 360 度
-    # 這樣座標全部在 0~360 範圍，讓太平洋完美置中，不分裂！
-    # ==========================================
+    # 跨太平洋日期變更線處理 (Rotate Lon)
     valid["map_lon"] = valid["lon"].apply(lambda x: x + 360 if pd.notnull(x) and x < 0 else x)
 
     center_lat = valid["lat"].mean()
     center_lon = valid["map_lon"].mean()
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
+
+    # ==========================================
+    # 🌐 疊加經緯度網格線 (Graticule)
+    # ==========================================
+    Graticule(color="#d0d0d0", weight=0.8, opacity=0.5).add_to(m)
 
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
@@ -271,7 +272,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
-            狀態：{v['status']} ・ 速度 {v['speed']:.1f} kn<br>
+            狀態：{v['status']}<br>
+            座標：{v['lat']:.4f}, {v['lon']:.4f}<br>
+            動態：航向 {v['heading']:.0f}° ・ 速度 {v['speed']:.1f} kn<br>
             最後訊號：{last_signal_str}（{v['signal_hours']:.1f} hr 前）<br>
             <hr style="margin:6px 0;">
             📋 待審 <b>{v.get('pending_count', 0)}</b> ・
@@ -283,7 +286,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         """
 
         folium.Marker(
-            location=[v["lat"], v["map_lon"]],  # 使用轉換後的置中經度
+            location=[v["lat"], v["map_lon"]],  
             tooltip=folium.Tooltip(f"<b>{v['油輪']}</b>", permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color=color, icon="ship", prefix="fa"),
@@ -555,70 +558,6 @@ def apply_mobile_filter_layout():
     """
     components.html(js, height=0, width=0)
 
-# --- 6. 滾動時或數秒後自動收折的提示框 ---
-def apply_scroll_dismiss_tip(tip_id: str):
-    js = f"""
-    <script>
-    (function() {{
-        let attempts = 0;
-        function init() {{
-            attempts++;
-            const doc = window.parent.document;
-            const win = window.parent;
-            const tip = doc.getElementById('{tip_id}');
-            if (!tip) {{ if (attempts < 30) setTimeout(init, 80); return; }}
-            if (tip.dataset.scrollInit === '1') return;
-            tip.dataset.scrollInit = '1';
-
-            const dismissedKey = 'fleet_tip_dismissed';
-
-            function hideTip() {{
-                tip.style.maxHeight = '0px';
-                tip.style.opacity = '0';
-                tip.style.marginTop = '0';
-                tip.style.marginBottom = '0';
-                tip.style.paddingTop = '0';
-                tip.style.paddingBottom = '0';
-                tip.style.borderWidth = '0';
-            }}
-
-            try {{
-                if (win.sessionStorage.getItem(dismissedKey) === '1') {{
-                    hideTip();
-                    return;
-                }}
-            }} catch (e) {{}}
-
-            let dismissed = false;
-            
-            // 滾動觸發隱藏
-            function onScroll() {{
-                if (dismissed) return;
-                if (win.scrollY > 40) {{
-                    dismissed = true;
-                    hideTip();
-                    try {{ win.sessionStorage.setItem(dismissedKey, '1'); }} catch (e) {{}}
-                    win.removeEventListener('scroll', onScroll);
-                }}
-            }}
-            win.addEventListener('scroll', onScroll, {{ passive: true }});
-            
-            // 5秒後自動隱藏
-            setTimeout(() => {{
-                if (!dismissed) {{
-                    dismissed = true;
-                    hideTip();
-                    try {{ win.sessionStorage.setItem(dismissedKey, '1'); }} catch (e) {{}}
-                    win.removeEventListener('scroll', onScroll);
-                }}
-            }}, 5000);
-        }}
-        setTimeout(init, 100);
-    }})();
-    </script>
-    """
-    components.html(js, height=0, width=0)
-
 
 # --- 介面渲染 ---
 st.markdown("""
@@ -656,9 +595,6 @@ if not df.empty:
     vessel_pos_df = load_vessel_positions()
     vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
 
-    # ===============================================
-    # 解法：避免修改 Widget Key，建立中介變數 selected_tanker
-    # ===============================================
     if "selected_tanker" not in st.session_state:
         st.session_state["selected_tanker"] = "全部"
 
@@ -708,23 +644,10 @@ if not df.empty:
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
-    # 📌 提示詞區塊與地圖顯示區
-    st.markdown('''
-    <div id="scroll-tip" style="
-        background-color:#1a3a5c;border:1px solid #2c5a8a;border-radius:6px;
-        padding:8px 14px;margin:2px 0 6px 0;color:#8ab4f8;font-size:0.85rem;
-        max-height:60px;overflow:hidden;
-        transition:opacity 0.25s ease, max-height 0.25s ease, margin 0.25s ease, padding 0.25s ease;">
-        💡 點擊左側表格內的任意郵件，即可在分割預覽完整內容。
-    </div>
-    ''', unsafe_allow_html=True)
-    apply_scroll_dismiss_tip("scroll-tip")
-
     # --- 船隊即時地圖 ---
     with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
         map_state = render_fleet_map(vessel_summary_df)
 
-        # 點擊地圖上的船 → 連動修改 selected_tanker (不再會觸發 APIException)
         clicked_vessel = None
         if map_state and map_state.get("last_object_clicked_tooltip"):
             clicked_html = map_state["last_object_clicked_tooltip"]
@@ -735,7 +658,6 @@ if not df.empty:
 
             match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
             if not match_row.empty and match_row["matched"].iloc[0]:
-                # 設定我們的中介狀態，而非直接操作元件的 key
                 st.session_state["selected_tanker"] = match_row["matched_油輪"].iloc[0]
             else:
                 st.session_state["selected_tanker"] = "全部"
