@@ -2,7 +2,5 @@ streamlit
 pandas
 pyyaml
 openpyxl
-gspread
-google-auth
 folium
 streamlit-folium
