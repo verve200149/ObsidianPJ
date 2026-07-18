@@ -373,10 +373,10 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     # 繪製經緯網格線 (純 Python 實現，極度穩定)
     # 畫緯線 (橫線) 每 15 度一條
     for lat_line in range(-75, 76, 15):
-        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
+        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
     # 畫經線 (直線) 每 30 度一條
     for lon_line in range(0, 361, 30):
-        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
+        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
 
     # 邊緣經緯度刻度：跟著 moveend / zoomend 即時重算位置
     EdgeTickOverlay().add_to(m)
