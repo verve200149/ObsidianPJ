@@ -6,6 +6,8 @@ from datetime import datetime, timezone, timedelta
 
 import folium
 from folium.plugins import MarkerCluster, MousePosition
+from folium.elements import MacroElement
+from jinja2 import Template
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -88,6 +90,47 @@ st.markdown("""
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
     </style>
     """, unsafe_allow_html=True)
+
+# ==========================================
+# 🗺️ 自訂 Folium 元件：自適應邊緣網格標籤
+# ==========================================
+class EdgeGraticule(MacroElement):
+    """
+    透過注入 Leaflet.latlng-graticule 插件，
+    實現動態適應地圖外框的邊緣經緯度標籤，並處理太平洋置中的經度轉換。
+    """
+    def __init__(self):
+        super().__init__()
+        self._template = Template("""
+        {% macro header(this, kwargs) %}
+        <script src="https://unpkg.com/leaflet.latlng-graticule/leaflet.latlng-graticule.js"></script>
+        {% endmacro %}
+
+        {% macro script(this, kwargs) %}
+        var graticule_{{ this.get_name() }} = L.latlngGraticule({
+            showLabel: true,
+            color: '#a0a0a0',
+            weight: 0.6,
+            dashArray: [4, 4],
+            zoomInterval: [
+                {start: 2, end: 4, interval: 30},
+                {start: 5, end: 6, interval: 15},
+                {start: 7, end: 20, interval: 5}
+            ],
+            lngFormatTickLabel: function(lng) {
+                var l = lng % 360;
+                if (l > 180) l -= 360;
+                else if (l < -180) l += 360;
+                if (l === 0 || Math.abs(l) === 180) return Math.abs(l) + '&deg;';
+                return Math.abs(l).toFixed(0) + (l > 0 ? '&deg;E' : '&deg;W');
+            },
+            latFormatTickLabel: function(lat) {
+                if (lat === 0) return '0&deg;';
+                return Math.abs(lat).toFixed(0) + (lat > 0 ? '&deg;N' : '&deg;S');
+            }
+        }).addTo({{ this._parent.get_name() }});
+        {% endmacro %}
+        """)
 
 # ==========================================
 # 🗺️ 船隊地圖相關：常數與工具函式
@@ -261,7 +304,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
     # ==========================================
-    # 📍 新增 1：動態滑鼠座標顯示器 (右上角)
+    # 📍 新增：動態滑鼠座標顯示器 (右上角)
     # 用 JS 轉換，讓大於 180 的經度自動減去 360 變回西經 (W)
     # ==========================================
     formatter_lon = "function(num) { var lng = num % 360; if (lng > 180) lng -= 360; else if (lng < -180) lng += 360; return lng.toFixed(4) + '°'; };"
@@ -278,42 +321,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     ).add_to(m)
 
     # ==========================================
-    # 🌐 新增 2：自訂繪製虛線網格 + 靜態文字標示
+    # 🌐 注入自適應邊緣網格 (取代原有的手繪靜態線條)
     # ==========================================
-    # 畫緯線 (橫線) 每 15 度一條
-    for lat_line in range(-75, 76, 15):
-        folium.PolyLine(
-            locations=[[lat_line, 0], [lat_line, 360]], 
-            color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
-        ).add_to(m)
-        
-        # 緯度文字標籤
-        if lat_line == 0: lat_str = "0°"
-        elif lat_line > 0: lat_str = f"{lat_line}°N"
-        else: lat_str = f"{-lat_line}°S"
-            
-        folium.Marker(
-            location=[lat_line, 180],  # 標示在太平洋中線上
-            icon=folium.DivIcon(html=f'<div style="font-size:11px; color:#808080; font-weight:bold; padding:2px; text-shadow: 1px 1px 1px #fff;">{lat_str}</div>')
-        ).add_to(m)
-
-    # 畫經線 (直線) 每 15 度一條 (0~360 對應原來的 -180~180)
-    for lon_line in range(0, 361, 15):
-        folium.PolyLine(
-            locations=[[-80, lon_line], [80, lon_line]], 
-            color="#a0a0a0", weight=0.6, opacity=0.4, dash_array="4, 4"
-        ).add_to(m)
-        
-        # 經度文字標籤
-        if lon_line == 0 or lon_line == 360: lon_str = "0°"
-        elif lon_line == 180: lon_str = "180°"
-        elif lon_line < 180: lon_str = f"{lon_line}°E"
-        else: lon_str = f"{360 - lon_line}°W"
-            
-        folium.Marker(
-            location=[0, lon_line],  # 標示在赤道上
-            icon=folium.DivIcon(html=f'<div style="font-size:11px; color:#808080; font-weight:bold; padding:2px; text-shadow: 1px 1px 1px #fff;">{lon_str}</div>')
-        ).add_to(m)
+    EdgeGraticule().add_to(m)
 
     # ==========================================
     # 聚類顯示：防重疊並提升渲染效能
@@ -731,7 +741,6 @@ if not df.empty:
     # ===============================================
     if "df_key_counter" not in st.session_state:
         st.session_state.df_key_counter = 0
-    # 藉由動態修改 Key 來達到「清除表格所有勾選」的效果
     DF_KEY = f"email_table_{st.session_state.df_key_counter}"
 
     if "sel_seq" not in st.session_state:
