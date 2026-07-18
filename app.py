@@ -291,26 +291,35 @@ _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": 
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
-    if valid.empty:
-        st.info("目前沒有可顯示座標的船舶資料。")
-        return None
-
-    # 跨太平洋日期變更線處理 (Rotate Lon)
     valid["map_lon"] = valid["lon"].apply(lambda x: x + 360 if pd.notnull(x) and x < 0 else x)
 
-    center_lat = valid["lat"].mean()
-    center_lon = valid["map_lon"].mean()
+    m = folium.Map(location=[valid["lat"].mean(), valid["map_lon"].mean()], zoom_start=3, tiles="CartoDB positron")
 
-    # 初始化地圖
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
-
-    # 繪製經緯網格線 (純 Python 實現，極度穩定)
-    # 畫緯線 (橫線) 每 15 度一條
+    # 1. 繪製穩定的網格線 (靜態)
     for lat_line in range(-75, 76, 15):
-        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
-    # 畫經線 (直線) 每 30 度一條
+        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#a0a0a0", weight=0.5, opacity=0.3, dash_array="5").add_to(m)
     for lon_line in range(0, 361, 30):
-        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#d0d0d0", weight=0.5, dash_array="5").add_to(m)
+        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#a0a0a0", weight=0.5, opacity=0.3, dash_array="5").add_to(m)
+
+    # 2. 核心優化：使用 folium 原生的 LatLngPopup
+    # 只要點擊地圖任意處，就會彈出該點的經緯度，這比強行固定標籤在邊緣更符合 Leaflet 的互動邏輯
+    m.add_child(folium.LatLngPopup())
+
+    # 3. 強制注入一個簡單的 JS 監聽器，將中心座標回傳給 Streamlit
+    # 這樣你可以把座標顯示在地圖「外」的側邊欄或上方，永遠保持清晰
+    m.add_child(folium.Element("""
+        <script>
+            var map = document.querySelector('.folium-map')._leaflet_map;
+            map.on('moveend', function() {
+                var center = map.getCenter();
+                // 將中心點座標發送回 streamlit
+                window.parent.postMessage({
+                    type: 'streamlit:setComponentValue',
+                    value: {lat: center.lat, lng: center.lng}
+                }, '*');
+            });
+        </script>
+    """))
 
     # 聚類設定 (MarkerCluster)
     marker_cluster = MarkerCluster(
