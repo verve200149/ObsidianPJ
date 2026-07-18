@@ -220,10 +220,8 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         else: vdf = df[df["油輪"] == v["油輪"]]
 
         matched = not vdf.empty
-        pending_count = int((vdf["狀態"] == "PENDING").sum())
-        approved_count = int(vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
+        # 已完成包含所有的 COMPLETED
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
-        kyc_fail_count = int(vdf["狀態"].str.contains("KYC", case=False, na=False).sum())
 
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
@@ -231,7 +229,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         matched_name = vdf["油輪"].iloc[0] if matched else None
 
         # ==========================================
-        # 📌 排除已配對結案的紀錄，保留尚未走完流程的訂單
+        # 📌 排除已配對結案的紀錄，計算出「準備加油」與近期清單
         # ==========================================
         paired_indices = set()
         valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
@@ -245,13 +243,15 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                         if pd.notnull(a_time) and pd.notnull(c_time):
                             diff = c_time - a_time
                             if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
-                                # 若配對成功，則將 APPROVED 及 COMPLETED 從待處理清單中排除
                                 paired_indices.add(a_idx)
                                 paired_indices.add(c_idx)
 
         active_vdf = vdf.drop(index=list(paired_indices))
 
-        # 抓「最新一筆的日期」往前推 2 天內的『未結案』紀錄
+        # 「準備加油」：排除結案後，仍在 active_vdf 中的 APPROVED 訂單
+        ready_count = int(active_vdf["狀態"].str.contains("APPROVED", case=False, na=False).sum())
+
+        # 抓「最新一筆的日期」往前推 2 天內的『未結案』紀錄給清單
         recent_sorted = active_vdf.sort_values("日期", ascending=False)
         if not recent_sorted.empty and pd.notnull(recent_sorted["日期"].iloc[0]):
             cutoff = recent_sorted["日期"].iloc[0] - pd.Timedelta(days=2)
@@ -262,10 +262,8 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         row.update({
             "matched": matched,
             "matched_油輪": matched_name,
-            "pending_count": pending_count,
-            "approved_count": approved_count,
+            "ready_count": ready_count,
             "completed_count": completed_count,
-            "kyc_fail_count": kyc_fail_count,
             "total_orders": len(vdf),
             "latest_subject": latest_subject,
             "latest_date": latest_date,
@@ -391,7 +389,7 @@ def _status_emoji(status):
 
 
 def _build_recent_orders_html(recent_orders, vessel_name):
-    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示，取代 details 標籤"""
+    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示"""
     if not recent_orders:
         return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
 
@@ -412,7 +410,6 @@ def _build_recent_orders_html(recent_orders, vessel_name):
         # 產生安全的 HTML ID，避免特殊字元導致 JS 失效
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
         
-        # 這裡將額外的內容預設隱藏，點擊按鈕後將其顯示，同時將按鈕本身隱藏
         html += (
             f'<div id="extra_{safe_id}" style="display:none;">{rest_html}</div>'
             f'<div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" '
@@ -462,9 +459,9 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         )
         match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
         
-        # 將船名傳入以產生獨立的 Popup 控制按鈕 ID
         recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
+        # 更新 Popup：移除待審，加入「準備加油」與「已完成」
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
@@ -473,8 +470,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             動態：航向 {v['heading']:.0f}° ・ 速度 {v['speed']:.1f} kn<br>
             最後訊號：{last_signal_str}（{v['signal_hours']:.1f} hr 前）<br>
             <hr style="margin:6px 0;">
-            📋 待審 <b>{v.get('pending_count', 0)}</b> ・
-            ✅ 已核准 <b>{v.get('approved_count', 0)}</b> ・
+            ✅ 準備加油 <b>{v.get('ready_count', 0)}</b> ・
             🏁 已完成 <b>{v.get('completed_count', 0)}</b>
             {recent_orders_html}
             {match_line}
