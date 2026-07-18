@@ -230,6 +230,10 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
         matched_name = vdf["油輪"].iloc[0] if matched else None
 
+        # 最近 5 筆訂單紀錄（狀態 + 船名），給地圖 popup 顯示用
+        recent = vdf.sort_values("日期", ascending=False).head(5)
+        recent_orders = recent[["狀態", "船名"]].to_dict("records") if not recent.empty else []
+
         row = v.to_dict()
         row.update({
             "matched": matched,
@@ -241,6 +245,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "total_orders": len(vdf),
             "latest_subject": latest_subject,
             "latest_date": latest_date,
+            "recent_orders": recent_orders,
         })
         summary_rows.append(row)
     return pd.DataFrame(summary_rows)
@@ -355,6 +360,44 @@ class EdgeTickOverlay(MacroElement):
         """)
 
 
+def _status_emoji(status):
+    s = str(status).upper()
+    if "APPROVED" in s: return "✅"
+    if "COMPLETED" in s: return "🏁"
+    if "KYC" in s or "CANCEL" in s: return "🚫"
+    if "PENDING" in s: return "📋"
+    return "•"
+
+
+def _build_recent_orders_html(recent_orders):
+    """組出 popup 裡「近期訂單」的清單 HTML：預設顯示前 3 筆，
+    有第 4~5 筆的話用 <details> 收合起來，點「顯示更多」才展開。"""
+    if not recent_orders:
+        return '<div style="color:#999; margin-top:2px;">尚無訂單紀錄</div>'
+
+    def _item(o):
+        status = o.get("狀態", "-") or "-"
+        ship = o.get("船名", "-") or "-"
+        return (
+            f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0;">'
+            f'{_status_emoji(status)} <b>{status}</b> ・ {ship}</div>'
+        )
+
+    items = [_item(o) for o in recent_orders]
+    html = '<div style="margin-top:4px;">' + "".join(items[:3])
+
+    if len(items) > 3:
+        rest_html = "".join(items[3:5])
+        html += (
+            f'<details style="margin-top:2px;">'
+            f'<summary style="cursor:pointer; color:#1a73e8; font-size:11px;">'
+            f'顯示更多（共 {len(items)} 筆）</summary>{rest_html}</details>'
+        )
+
+    html += "</div>"
+    return html
+
+
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
     if valid.empty:
@@ -389,15 +432,12 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     for _, v in valid.iterrows():
         color = _MARKER_COLOR.get(v["status"], "blue")
         last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
-        latest_date_str = (
-            pd.to_datetime(v["latest_date"]).strftime("%m/%d %H:%M")
-            if pd.notnull(v.get("latest_date")) else "-"
-        )
         match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
+        recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []))
 
         # 詳細資訊 Popup
         popup_html = f"""
-        <div style="font-family:sans-serif; font-size:13px; min-width:200px;">
+        <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
             <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
             狀態：{v['status']}<br>
             座標：{v['lat']:.4f}, {v['lon']:.4f}<br>
@@ -406,8 +446,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             <hr style="margin:6px 0;">
             📋 待審 <b>{v.get('pending_count', 0)}</b> ・
             ✅ 已核准 <b>{v.get('approved_count', 0)}</b> ・
-            🏁 已完成 <b>{v.get('completed_count', 0)}</b><br>
-            最新郵件（{latest_date_str}）：{v.get('latest_subject', '-')}
+            🏁 已完成 <b>{v.get('completed_count', 0)}</b>
+            {recent_orders_html}
             {match_line}
         </div>
         """
