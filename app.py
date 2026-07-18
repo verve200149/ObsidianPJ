@@ -90,13 +90,13 @@ st.markdown("""
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
 
     /* ==========================================
-       ✨ 船名標籤淡化與高負載閃爍動畫
+       ✨ 船名標籤淡化設計與縮小字體
        ========================================== */
     .leaflet-tooltip {
         background-color: rgba(255, 255, 255, 0.65) !important;
         border: 1px solid rgba(200, 200, 200, 0.2) !important;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
-        font-size: 11px !important;
+        font-size: 10px !important; /* 縮小船名標籤字體 */
         font-weight: 600 !important;
         padding: 2px 6px !important;
         backdrop-filter: blur(2px);
@@ -104,12 +104,6 @@ st.markdown("""
     /* 隱藏標籤旁邊突出的小箭頭，讓畫面更乾淨 */
     .leaflet-tooltip-right::before, .leaflet-tooltip-left::before {
         display: none !important; 
-    }
-    /* 滿載警示閃爍動畫 */
-    @keyframes warning-blink {
-        0% { opacity: 1; transform: scale(1); }
-        50% { opacity: 0.6; transform: scale(1.05); }
-        100% { opacity: 1; transform: scale(1); }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -279,7 +273,6 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             recent_active_vdf = active_vdf[active_vdf["日期"] >= cutoff]
             recent_sorted = recent_sorted[recent_sorted["日期"] >= cutoff]
         else:
-            # 🐛 修正錯誤：使用 active_vdf.iloc[0:0] 產生帶有正確欄位(如IMO)的空表
             recent_active_vdf = active_vdf.iloc[0:0]
 
         # 「準備加油」：限縮在 5 天內、必須為有效 IMO，且排除重複的 IMO
@@ -444,7 +437,6 @@ def _build_recent_orders_html(recent_orders, vessel_name):
 
     if len(items) > 3:
         rest_html = "".join(items[3:])
-        # 產生安全的 HTML ID，避免特殊字元導致 JS 失效
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
         
         html += (
@@ -473,7 +465,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     # 初始化地圖
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
-    # 繪製經緯網格線 (純 Python 實現，極度穩定)
+    # 繪製經緯網格線 (純 Python 實現)
     for lat_line in range(-75, 76, 15):
         folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
     for lon_line in range(0, 361, 30):
@@ -497,19 +489,17 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
         # ==========================================
-        # 🚨 高負載警示判斷 (準備加油 >= 10)
+        # 📍 視覺標籤設定 (高負載 >= 10 用深橘色，一般用深灰)
         # ==========================================
         ready_count = v.get('ready_count', 0)
+        marker_color = _MARKER_COLOR.get(v["status"], "blue")
+        
         if ready_count >= 10:
-            # 加入閃爍動畫的紅色標籤
-            tooltip_html = f"<div style='color:#d32f2f; animation: warning-blink 1.5s infinite;'>🚨 {v['油輪']}</div>"
-            marker_color = "red"
-            icon_type = "fire"
+            # 深橘色標籤 + 船隻圖標 (FontAwesome)
+            tooltip_html = f"<div style='color:#e65100;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
         else:
-            # 輕量化的灰色標籤
-            tooltip_html = f"<div style='color:#666;'>{v['油輪']}</div>"
-            marker_color = _MARKER_COLOR.get(v["status"], "blue")
-            icon_type = "ship"
+            # 輕量化深灰色標籤 + 船隻圖標 (FontAwesome)
+            tooltip_html = f"<div style='color:#666;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
 
         # Popup 詳細內容
         popup_html = f"""
@@ -531,7 +521,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             location=[v["lat"], v["map_lon"]],  
             tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
             popup=folium.Popup(popup_html, max_width=280),
-            icon=folium.Icon(color=marker_color, icon=icon_type, prefix="fa"),
+            icon=folium.Icon(color=marker_color, icon="ship", prefix="fa"),
         ).add_to(marker_cluster)
 
     map_state = st_folium(
@@ -894,7 +884,7 @@ if not df.empty:
         if map_state and map_state.get("last_object_clicked_tooltip"):
             clicked_html = map_state["last_object_clicked_tooltip"]
             # 移除所有 HTML 標籤抓取船名 (對應高負載或一般狀態的 tooltip)
-            clicked_vessel = re.sub(r'<[^>]*>', '', clicked_html).replace('🚨', '').replace('🔥', '').strip()
+            clicked_vessel = re.sub(r'<[^>]*>', '', clicked_html).strip()
 
         if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
             st.session_state["_last_clicked_vessel"] = clicked_vessel
