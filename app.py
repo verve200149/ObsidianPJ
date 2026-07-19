@@ -136,17 +136,12 @@ def get_imo_current_status(imo_group_df):
     app_time = latest_app["日期"]
     
     # 在這筆預報之後，發生了什麼事？
-    # 這裡加入：是否有「後續的預報」
     future_apps = apps[apps["日期"] > app_time]
     future_terms = terminators[terminators["日期"] > app_time]
     
-    # 如果有後續預報，直接判定這張單被覆蓋（理論上不會走到這裡，因為
-    # latest_app 本身就是 apps 裡日期最新的一筆，future_apps 必為空；
-    # 保留這個分支只是防禦性寫法）
     if not future_apps.empty:
         return {"current_status": "CANCEL", "last_date": future_apps.iloc[0]["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
-    # 如果之後有結案事件，取最先發生的那一個
     if not future_terms.empty:
         first_term = future_terms.sort_values("日期").iloc[0]
         term_status = str(first_term["狀態"]).upper()
@@ -156,10 +151,8 @@ def get_imo_current_status(imo_group_df):
         else:
             return {"current_status": "CANCEL", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
     
-    # 🌟 手動關閉機制：如果這封信的 status 被人工從 pending 改成 clear，
-    # 代表業務上已經確認這筆訂單結束了（只是系統一直等不到 COMPLETED 通知），
-    # 直接視為 DONE-C（人工結案）。注意這只影響「原本會判定成 PLAN」的情況——
-    # 前面已經有 CANCEL / DONE 的分支都已經 return 掉了，不會被這裡覆蓋。
+    # 🌟 來到這裡代表未來「什麼事都沒發生」！
+    # 這時候才啟動手動關閉機制
     manual_status = str(latest_app.get('手動狀態', 'pending')).strip().lower()
     if manual_status == 'clear':
         return {"current_status": "DONE-C", "last_date": app_time, "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
@@ -955,28 +948,16 @@ if not df.empty and "IMO" in df.columns:
         # 2. 核心邏輯：如果這封信是 APPROVED，則「往未來的時間」尋找是否有結案紀錄
         if "APPROVED" in raw_status or "PLAN" in raw_status:
             
-            # 🌟 絕對優先權：先檢查手動屬性，如果有 clear 直接強制歸類為 DONE-C，不看後續歷史
-            manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
-            if manual_status == 'clear':
-                final_statuses.append("DONE-C")  # 🌟 改為 DONE-C
-                continue
-            
             t = row['日期']
             if pd.isna(t):
                 final_statuses.append("PLAN")
                 continue
                 
             imo_group = grouped_df.get_group(imo)
-            # 🌟 關鍵：只看這封信「時間點之後」發生的歷史
             future_events = imo_group[imo_group['日期'] >= t]
             
             comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
             canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
-
-            # 🌟 修正：原本這裡完全沒有檢查「同一個 IMO 之後有沒有更新的 APPROVED」，
-            # 導致重複預報時，舊的那筆 APPROVED 只要之後沒接到 COMPLETED/CANCELLED，
-            # 就會一直卡在 PLAN，即使實際上已經被新的預報取代了。
-            # 這裡補上：找出「日期嚴格晚於這一筆」的新 APPROVED，標記成 EXTEND。
             reschedule_ev = future_events[
                 (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
                 & (future_events['日期'] > t)
@@ -992,16 +973,18 @@ if not df.empty and "IMO" in df.columns:
             if pd.notnull(first_reschedule): cands.append(("EXTEND", first_reschedule))
             
             if not cands:
-                # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 原本會判定成 PLAN。
-                # 接著計算是否超過 14 天逾期
-                tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
-                now = pd.Timestamp.now(tz=tz_info)
-                if (now - t).days > 14:
-                    final_statuses.append("OVERDUE")
+                # 🌟 當找不到未來的結案信（原本要卡在 PLAN 時），才檢查手動 clear
+                manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
+                if manual_status == 'clear':
+                    final_statuses.append("DONE-C")
                 else:
-                    final_statuses.append("PLAN")
+                    tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
+                    now = pd.Timestamp.now(tz=tz_info)
+                    if (now - t).days > 14:
+                        final_statuses.append("OVERDUE")
+                    else:
+                        final_statuses.append("PLAN")
             else:
-                # 找到的候選事件裡，取「最早發生」的那一個當作這筆紀錄的真正結局
                 final_statuses.append(min(cands, key=lambda x: x[1])[0])
             continue
             
