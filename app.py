@@ -1,4 +1,4 @@
-import streamlit as st
+      import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import os, yaml, json, re, io, html
@@ -101,8 +101,8 @@ def get_imo_current_status(imo_group_df):
     """
     分析每一張 APPROVED 訂單的最終結局：
     1. 後續接 COMPLETED -> DONE
-    2. 後續接新的 APPROVED -> COVER(X)
-    3. 後續接 CANCEL 郵件 -> CANCEL(X)
+    2. 後續接新的 APPROVED（重複預報）-> EXTEND
+    3. 後續接 CANCEL 郵件 -> CANCEL
     """
     valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期")
     if valid_df.empty: return None
@@ -126,9 +126,11 @@ def get_imo_current_status(imo_group_df):
     future_apps = apps[apps["日期"] > app_time]
     future_terms = terminators[terminators["日期"] > app_time]
     
-    # 如果有後續預報，直接判定這張單被覆蓋
+    # 如果有後續預報，直接判定這張單被覆蓋（理論上不會走到這裡，因為
+    # latest_app 本身就是 apps 裡日期最新的一筆，future_apps 必為空；
+    # 保留這個分支只是防禦性寫法）
     if not future_apps.empty:
-        return {"current_status": "CANCEL(X)", "last_date": future_apps.iloc[0]["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+        return {"current_status": "CANCEL", "last_date": future_apps.iloc[0]["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
     # 如果之後有結案事件，取最先發生的那一個
     if not future_terms.empty:
@@ -138,16 +140,16 @@ def get_imo_current_status(imo_group_df):
         if "COMPLETED" in term_status:
             return {"current_status": "DONE", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
         else:
-            return {"current_status": "CANCEL(X)", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+            return {"current_status": "CANCEL", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
     
     # 情況：之後什麼都沒有 -> 仍在進行中 (PLAN)
     # 🌟 手動關閉機制：如果這封信的 status 被人工從 pending 改成 clear，
     # 代表業務上已經確認這筆訂單結束了（只是系統一直等不到 COMPLETED 通知），
-    # 直接視為 DONE(CLEAR)。注意這只影響「原本會判定成 PLAN」的情況——
-    # 前面已經有 CANCEL(X) / DONE 的分支都已經 return 掉了，不會被這裡覆蓋。
+    # 直接視為 WELL（人工結案）。注意這只影響「原本會判定成 PLAN」的情況——
+    # 前面已經有 CANCEL / DONE 的分支都已經 return 掉了，不會被這裡覆蓋。
     manual_status = str(latest_app.get('手動狀態', 'pending')).strip().lower()
     if manual_status == 'clear':
-        return {"current_status": "DONE(CLEAR)", "last_date": app_time, "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+        return {"current_status": "WELL", "last_date": app_time, "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
     is_overdue = (pd.Timestamp.now(tz=app_time.tzinfo if hasattr(app_time, 'tzinfo') else None) - app_time).days > 14
     return {"current_status": "PLAN", "last_date": app_time, "is_overdue": is_overdue, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
@@ -258,10 +260,12 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                     plan_count += 1
                     ready_count += 1
                     if is_overdue: overdue_count += 1
-                elif c_status.startswith("DONE"):
+                elif c_status.startswith("DONE") or c_status == "WELL":
                     done_count += 1
 
-                # 準備近期訂單列表
+                # 準備近期訂單列表：
+                # - 未完成 (PLAN/OVERDUE，也就是 APPD) 不管日期多舊，一律都要列出來
+                # - 已結案 (CMP/CANCEL/WELL) 只列近 5 天內的，避免清單被歷史紀錄灌爆
                 tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
                 cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
                 
@@ -274,7 +278,17 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                         "IMO": imo
                     })
 
+            def _status_priority(status_text):
+                s = str(status_text).upper()
+                if "OVERDUE" in s or "PLAN" in s: return 0   # APPD：未完成，優先顯示
+                if "DONE" in s or "WELL" in s: return 1       # CMP：已完成
+                return 2                                       # CANCEL（或其他）：優先權最低
+
+            # 用兩次「穩定排序」達成「先照優先序分組，組內再依日期新到舊」：
+            # 先整批依日期新到舊排好，再依優先序分組——因為 Python 的 sort 是
+            # 穩定排序，同優先序內原本的日期順序不會被打亂。
             recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
+            recent_orders = sorted(recent_orders, key=lambda x: _status_priority(x["狀態"]))
 
         row = v.to_dict()
         row.update({
@@ -299,6 +313,28 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 # ==========================================
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 _MARKER_HEX = {"🔴 No Signal": "#e53935", "🟡 Weak": "#fb8c00", "🟢 Normal": "#2e7d32"}
+
+# 沒有配對到任何訂單的船，icon 維持灰色（跟航速色階獨立，優先權最高）
+_NO_ORDER_COLOR = "#9e9e9e"
+
+def _icon_color_by_speed(matched, speed):
+    """
+    船形 icon 顏色：
+    - 沒有配對到訂單 -> 灰色（維持既有規則，優先於航速判斷）
+    - 有訂單時依航速分四段上色，對應原本 GAS 腳本的 speedToColor 漸層：
+      0~2kn / 2~6kn / 6~10kn / 10kn 以上
+    """
+    if not matched:
+        return _NO_ORDER_COLOR
+    speed = speed or 0
+    if speed < 2:
+        return "#90CAF9"
+    elif speed < 6:
+        return "#42A5F5"
+    elif speed < 10:
+        return "#1E88E5"
+    else:
+        return "#0D47A1"
 
 # 主要港口／島國參考點
 MAJOR_PORTS = [
@@ -503,9 +539,10 @@ def _build_recent_orders_html(recent_orders, vessel_name):
         status = str(o.get("狀態", "-")).upper()
         # 轉換回原本的習慣縮寫與 Icon
         if "OVERDUE" in status: emoji, display = "⚠️", "OVERDUE"
+        elif "WELL" in status: emoji, display = "🏁", "WELL"
         elif "PLAN" in status or "APPROVED" in status: emoji, display = "✅", "APPD"
         elif "DONE" in status or "COMPLETED" in status: emoji, display = "🏁", "CMP"
-        elif "CANCEL" in status: emoji, display = "🚫", "CANCEL(X)"
+        elif "CANCEL" in status: emoji, display = "🚫", "CANCEL"
         else: emoji, display = "📋", status
         
         ship = o.get("船名", "-") or "-"
@@ -521,7 +558,7 @@ def _build_recent_orders_html(recent_orders, vessel_name):
         rest_html = "".join(items[3:])
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
         scroll_style = " max-height:220px; overflow-y:auto;" if total > 10 else ""
-        html_out += f'<div id="extra_{safe_id}" style="display:none;{scroll_style}">{rest_html}</div><div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" onclick="document.getElementById(\'extra_{safe_id}\').style.display=\'block\'; this.style.display=\'none\';">▼ 顯示更多近五天訂單（共 {total} 筆）</div>'
+        html_out += f'<div id="extra_{safe_id}" style="display:none;{scroll_style}">{rest_html}</div><div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" onclick="document.getElementById(\'extra_{safe_id}\').style.display=\'block\'; this.style.display=\'none\';">▼ 顯示全部訂單（共 {total} 筆，已結案僅列近5天）</div>'
     html_out += "</div>"
     return html_out
 
@@ -541,9 +578,10 @@ def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
         for o in recent_orders:
             status = str(o.get("狀態", "-")).upper()
             if "OVERDUE" in status: display = "⚠️ OVERDUE"
+            elif "WELL" in status: display = "🏁 WELL"
             elif "PLAN" in status or "APPROVED" in status: display = "✅ APPD"
             elif "DONE" in status or "COMPLETED" in status: display = "🏁 CMP"
-            elif "CANCEL" in status: display = "🚫 CANCEL(X)"
+            elif "CANCEL" in status: display = "🚫 CANCEL"
             else: display = f"📋 {status}"
             
             ship = o.get("船名", "-") or "-"
@@ -600,7 +638,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         label_color = _tooltip_style(v)
         # 字級也直接寫在 inline style 當雙重保險，不只靠外部 CSS
         tooltip_html = f"<div style='color:{label_color}; font-size:8px; line-height:1.1;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
-        icon_hex = _MARKER_HEX.get(v["status"], "#1e88e5")
+        icon_hex = _icon_color_by_speed(v.get("matched"), v.get("speed", 0))
         coord_str = _format_coord(v["lat"], v["lon"])
         copy_text = _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str)
         copy_text_attr = html.escape(copy_text, quote=True)
@@ -859,7 +897,7 @@ if not df.empty and "IMO" in df.columns:
         # 1. 無效 IMO 或本身就是結案狀態，直接給予對應狀態
         if pd.isna(imo) or imo in ['-', '', '(本次無資料)']:
             if "COMPLETED" in raw_status: final_statuses.append("DONE")
-            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL(X)")
+            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL")
             elif "APPROVED" in raw_status: final_statuses.append("PLAN")
             else: final_statuses.append(raw_status)
             continue
@@ -868,7 +906,7 @@ if not df.empty and "IMO" in df.columns:
             final_statuses.append("DONE")
             continue
         if "CANCEL" in raw_status or "KYC" in raw_status:
-            final_statuses.append("CANCEL(X)")
+            final_statuses.append("CANCEL")
             continue
             
         # 2. 核心邏輯：如果這封信是 APPROVED，則「往未來的時間」尋找是否有結案紀錄
@@ -888,7 +926,7 @@ if not df.empty and "IMO" in df.columns:
             # 🌟 修正：原本這裡完全沒有檢查「同一個 IMO 之後有沒有更新的 APPROVED」，
             # 導致重複預報時，舊的那筆 APPROVED 只要之後沒接到 COMPLETED/CANCELLED，
             # 就會一直卡在 PLAN，即使實際上已經被新的預報取代了。
-            # 這裡補上：找出「日期嚴格晚於這一筆」的新 APPROVED，標記成 RESCHEDULE。
+            # 這裡補上：找出「日期嚴格晚於這一筆」的新 APPROVED，標記成 EXTEND。
             reschedule_ev = future_events[
                 (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
                 & (future_events['日期'] > t)
@@ -900,17 +938,17 @@ if not df.empty and "IMO" in df.columns:
             
             cands = []
             if pd.notnull(first_comp): cands.append(("DONE", first_comp))
-            if pd.notnull(first_canc): cands.append(("CANCEL(X)", first_canc))
-            if pd.notnull(first_reschedule): cands.append(("RESCHEDULE", first_reschedule))
+            if pd.notnull(first_canc): cands.append(("CANCEL", first_canc))
+            if pd.notnull(first_reschedule): cands.append(("EXTEND", first_reschedule))
             
             if not cands:
                 # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 原本會判定成 PLAN。
                 # 🌟 手動關閉機制：先檢查這封信的 status 有沒有被人工從 pending
                 # 改成 clear——如果有，代表業務上已經確認結束了（等不到 COMPLETED
-                # 通知的情況），直接判定 DONE(CLEAR)，不用再算逾期。
+                # 通知的情況），直接判定 WELL，不用再算逾期。
                 manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
                 if manual_status == 'clear':
-                    final_statuses.append("DONE(CLEAR)")
+                    final_statuses.append("WELL")
                 else:
                     # 接著計算是否超過 14 天逾期
                     tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
@@ -921,7 +959,7 @@ if not df.empty and "IMO" in df.columns:
                         final_statuses.append("PLAN")
             else:
                 # 找到的候選事件裡，取「最早發生」的那一個當作這筆紀錄的真正結局
-                # （例如：3天後被重新預報 vs 5天後才完成 -> 應該算 RESCHEDULE，不是 DONE）
+                # （例如：3天後被重新預報 vs 5天後才完成 -> 應該算 EXTEND，不是 DONE）
                 final_statuses.append(min(cands, key=lambda x: x[1])[0])
             continue
             
@@ -1053,13 +1091,13 @@ if not df.empty:
 
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "OVERDUE" in val_upper: return "background-color: #ffcdd2; color: #b71c1c; font-weight: bold;"
-            elif "RESCHEDULE" in val_upper: return "background-color: rgba(120, 170, 230, 0.35); color: #1a4d8f; font-weight: bold;"
-            elif "DONE(CLEAR)" in val_upper: return "background-color: rgba(0, 150, 136, 0.30); color: #00695c; font-weight: bold;"
-            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(250, 225, 50, 0.3);"
-            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(255, 128, 128, 0.3);"
-            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3);"
-            elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.3);"
+            if "OVERDUE" in val_upper: return "background-color: #c62828; color: #ffffff; font-weight: bold;"
+            elif "EXTEND" in val_upper: return "background-color: #1565c0; color: #ffffff; font-weight: bold;"
+            elif "WELL" in val_upper: return "background-color: #00897b; color: #ffffff; font-weight: bold;"
+            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: #fb8c00; color: #ffffff; font-weight: bold;"
+            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: #e53935; color: #ffffff; font-weight: bold;"
+            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: #8e24aa; color: #ffffff; font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: #757575; color: #ffffff; font-weight: bold;"
             return ""
 
         valid_dup_indices = _compute_duplicate_pair_indices(display_df)
