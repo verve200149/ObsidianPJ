@@ -30,16 +30,11 @@ st.markdown("""
     .email-meta { font-size: 0.9em; color: #5f6368; }
     .email-body { white-space: pre-wrap; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; line-height: 1.6; color: #444444; }
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
-    .leaflet-tooltip {
-        background-color: rgba(255, 255, 255, 0.65) !important;
-        border: 1px solid rgba(200, 200, 200, 0.2) !important;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
-        font-size: 10px !important; font-weight: 600 !important;
-        padding: 2px 6px !important; backdrop-filter: blur(2px);
-    }
-    .leaflet-tooltip-right::before, .leaflet-tooltip-left::before { display: none !important; }
     </style>
     """, unsafe_allow_html=True)
+# 註：原本這裡有一段 .leaflet-tooltip 的 CSS，但 st_folium 是把地圖渲染在獨立 iframe 裡，
+# 外層頁面的 CSS 進不去 iframe 內部，完全沒有作用。真正生效的版本現在寫在
+# render_fleet_map() 裡面，透過 m.get_root().header.add_child() 直接注入地圖自己的 <head>。
 
 # ==========================================
 # 🗺️ 常數與工具函式
@@ -297,22 +292,176 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 _MARKER_HEX = {"🔴 No Signal": "#e53935", "🟡 Weak": "#fb8c00", "🟢 Normal": "#2e7d32"}
 
+# 主要港口／島國參考點
 MAJOR_PORTS = [
     {"name": "Kaohsiung", "lat": 22.61, "lon": 120.31},
     {"name": "Singapore", "lat": 1.26, "lon": 103.83},
-    # ... (省略部分港口以節省空間，請自行補回你原有的 MAJOR_PORTS 清單) ...
+    {"name": "Busan", "lat": 35.10, "lon": 129.04},
+    {"name": "Yeosu", "lat": 34.74, "lon": 127.75},
+    {"name": "Callao", "lat": -12.06, "lon": -77.15},
+    {"name": "Valparaiso", "lat": -33.04, "lon": -71.62},
+    {"name": "San Antonio", "lat": -33.58, "lon": -71.63},
+    {"name": "Antofagasta", "lat": -23.65, "lon": -70.40},
+    {"name": "Dili", "lat": -8.55, "lon": 125.57},
+    {"name": "Christmas Is.", "lat": -10.42, "lon": 105.67},
+    {"name": "Kiritimati", "lat": 1.87, "lon": -157.42},
+    {"name": "Pohnpei", "lat": 6.92, "lon": 158.15},
+    {"name": "Kosrae", "lat": 5.32, "lon": 162.98},
+    {"name": "Tuvalu", "lat": -8.52, "lon": 179.19},
+    {"name": "Nauru", "lat": -0.53, "lon": 166.91},
+    {"name": "Marshall Is.", "lat": 7.09, "lon": 171.38},
+    {"name": "Rabaul", "lat": -4.20, "lon": 152.18},
+    {"name": "Papeete", "lat": -17.53, "lon": -149.57},
 ]
 
+
 class EdgeTickOverlay(MacroElement):
+    """
+    在地圖容器的四個邊緣顯示動態經緯度刻度，跟著 moveend / zoomend
+    即時重新計算像素位置，效果類似固定在畫面邊框的座標軸。
+    純內嵌 JS，不依賴任何外部 CDN。
+    """
     def __init__(self):
         super().__init__()
         self._template = Template("""
         {% macro script(this, kwargs) %}
         (function() {
-            // ... (請補回你原有的 EdgeTickOverlay JS 邏輯) ...
+            var map = {{ this._parent.get_name() }};
+            var container = map.getContainer();
+
+            var overlay = document.createElement('div');
+            overlay.style.position = 'absolute';
+            overlay.style.top = '0';
+            overlay.style.left = '0';
+            overlay.style.width = '100%';
+            overlay.style.height = '100%';
+            overlay.style.pointerEvents = 'none';
+            overlay.style.zIndex = '650';
+            container.appendChild(overlay);
+
+            var NICE_STEPS = [1, 2, 5, 10, 15, 30, 45, 60, 90];
+            function niceStep(span, targetCount) {
+                var raw = span / targetCount;
+                for (var i = 0; i < NICE_STEPS.length; i++) {
+                    if (NICE_STEPS[i] >= raw) return NICE_STEPS[i];
+                }
+                return 90;
+            }
+
+            function fmtLon(lon) {
+                var l = ((lon % 360) + 540) % 360 - 180;
+                l = Math.round(l);
+                if (l === 0) return '0°';
+                if (Math.abs(l) === 180) return '180°';
+                return Math.abs(l) + (l > 0 ? '°E' : '°W');
+            }
+            function fmtLat(lat) {
+                lat = Math.round(lat);
+                if (lat === 0) return '0°';
+                return Math.abs(lat) + (lat > 0 ? '°N' : '°S');
+            }
+
+            function addLabel(text, x, y, transform) {
+                var el = document.createElement('div');
+                el.textContent = text;
+                el.style.position = 'absolute';
+                el.style.fontSize = '10px';
+                el.style.fontWeight = 'bold';
+                el.style.color = '#546e7a';
+                el.style.background = 'rgba(255,255,255,0.85)';
+                el.style.padding = '1px 3px';
+                el.style.borderRadius = '2px';
+                el.style.whiteSpace = 'nowrap';
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+                el.style.transform = transform;
+                overlay.appendChild(el);
+            }
+
+            function redraw() {
+                overlay.innerHTML = '';
+                var size = map.getSize();
+                var bounds = map.getBounds();
+                var west = bounds.getWest();
+                var east = bounds.getEast();
+                var south = bounds.getSouth();
+                var north = bounds.getNorth();
+                var lonSpan = east - west;
+                var latSpan = north - south;
+                if (lonSpan <= 0 || latSpan <= 0) return;
+
+                var lonStep = niceStep(lonSpan, 6);
+                var latStep = niceStep(latSpan, 5);
+
+                var lonStart = Math.ceil(west / lonStep) * lonStep;
+                for (var lon = lonStart; lon <= east; lon += lonStep) {
+                    var ptTop = map.latLngToContainerPoint([north, lon]);
+                    var ptBottom = map.latLngToContainerPoint([south, lon]);
+                    addLabel(fmtLon(lon), ptTop.x, 4, 'translateX(-50%)');
+                    addLabel(fmtLon(lon), ptBottom.x, size.y - 16, 'translateX(-50%)');
+                }
+
+                var latStart = Math.ceil(south / latStep) * latStep;
+                for (var lat = latStart; lat <= north; lat += latStep) {
+                    var ptLeft = map.latLngToContainerPoint([lat, west]);
+                    var ptRight = map.latLngToContainerPoint([lat, east]);
+                    addLabel(fmtLat(lat), 4, ptLeft.y, 'translateY(-50%)');
+                    addLabel(fmtLat(lat), size.x - 4, ptRight.y, 'translate(-100%, -50%)');
+                }
+            }
+
+            map.on('moveend', redraw);
+            map.on('zoomend', redraw);
+            map.whenReady(redraw);
+            setTimeout(redraw, 200);
         })();
         {% endmacro %}
         """)
+
+
+class TooltipClickOpensPopup(MacroElement):
+    """
+    讓永久顯示的船名標籤（tooltip）本身也可以點擊，直接開啟該船的 popup，
+    不用非得精準點到很小的三角形 icon 才有反應。
+
+    因為船隻標記是放在 MarkerCluster 裡，縮放/群聚時會動態進出 DOM，
+    所以綁定邏輯掛在幾個群組事件上、並搭配延遲重試，確保新出現的
+    tooltip 也會被補上點擊事件。
+    """
+    def __init__(self):
+        super().__init__()
+        self._template = Template("""
+        {% macro script(this, kwargs) %}
+        (function() {
+            var group = {{ this._parent.get_name() }};
+
+            function bindTooltipClicks() {
+                group.eachLayer(function(layer) {
+                    if (!layer.getTooltip) return;
+                    var tooltip = layer.getTooltip();
+                    if (!tooltip) return;
+                    var el = tooltip.getElement ? tooltip.getElement() : null;
+                    if (!el || el.dataset.clickBound === '1') return;
+                    el.dataset.clickBound = '1';
+                    el.style.pointerEvents = 'auto';
+                    el.style.cursor = 'pointer';
+                    el.addEventListener('click', function(ev) {
+                        ev.stopPropagation();
+                        layer.openPopup();
+                    });
+                });
+            }
+
+            group.on('layeradd', bindTooltipClicks);
+            group.on('spiderfied', bindTooltipClicks);
+            group.on('animationend', bindTooltipClicks);
+            setTimeout(bindTooltipClicks, 300);
+            setTimeout(bindTooltipClicks, 1000);
+            setTimeout(bindTooltipClicks, 2000);
+        })();
+        {% endmacro %}
+        """)
+
 
 def _add_major_ports(m):
     for p in MAJOR_PORTS:
@@ -320,9 +469,17 @@ def _add_major_ports(m):
         folium.CircleMarker(location=[p["lat"], map_lon], radius=3, color="#78909c", weight=1, fill=True, fill_color="#cfd8dc", fill_opacity=0.9, tooltip=p["name"]).add_to(m)
         folium.Marker(location=[p["lat"], map_lon], icon=folium.DivIcon(html=('<div style="font-size:9px; color:#78909c; font-weight:600; white-space:nowrap; transform:translate(6px,-4px); text-shadow:0 0 2px #fff, 0 0 2px #fff;">' + p["name"] + '</div>'), icon_size=(0, 0), icon_anchor=(0, 0))).add_to(m)
 
-def _ship_div_icon(color_hex, heading):
-    svg = f'<div style="width:24px; height:24px; transform:rotate({heading}deg); filter:drop-shadow(0 1px 1px rgba(0,0,0,0.35));"><svg viewBox="0 0 24 24" width="24" height="24"><path d="M12 1.5 L19 16 L12 12.5 L5 16 Z" fill="{color_hex}" stroke="#2d2d2d" stroke-width="1" stroke-linejoin="round"/></svg></div>'
-    return folium.DivIcon(html=svg, icon_size=(24, 24), icon_anchor=(12, 12))
+def _ship_div_icon(color_hex, heading, size=34):
+    """船形 icon：三角箭頭造型，會依航向旋轉。size 可調整整體大小（原本 24，放大到 34）。"""
+    half = size / 2
+    svg = (
+        f'<div style="width:{size}px; height:{size}px; transform:rotate({heading}deg); '
+        f'filter:drop-shadow(0 1px 1.5px rgba(0,0,0,0.4));">'
+        f'<svg viewBox="0 0 24 24" width="{size}" height="{size}">'
+        f'<path d="M12 1.5 L19 16 L12 12.5 L5 16 Z" fill="{color_hex}" stroke="#2d2d2d" stroke-width="1" stroke-linejoin="round"/>'
+        f'</svg></div>'
+    )
+    return folium.DivIcon(html=svg, icon_size=(size, size), icon_anchor=(int(half), int(half)))
 
 def _tooltip_style(v):
     if not v.get("matched"): return "#9e9e9e"
@@ -399,6 +556,22 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
+    # 🌟 船名標籤的縮小 CSS 直接注入地圖自己的 <head>（在 iframe 內部才會生效）
+    m.get_root().header.add_child(folium.Element("""
+    <style>
+    .leaflet-tooltip {
+        background-color: rgba(255, 255, 255, 0.72) !important;
+        border: 1px solid rgba(200, 200, 200, 0.35) !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.15) !important;
+        font-size: 8px !important;
+        font-weight: 600 !important;
+        padding: 1px 4px !important;
+        line-height: 1.2 !important;
+    }
+    .leaflet-tooltip-right::before, .leaflet-tooltip-left::before { display: none !important; }
+    </style>
+    """))
+
     for lat_line in range(-75, 76, 15):
         folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
     for lon_line in range(0, 361, 30):
@@ -417,7 +590,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         plan_count = v.get('plan_count', 0)
         done_count = v.get('done_count', 0)
         label_color = _tooltip_style(v)
-        tooltip_html = f"<div style='color:{label_color};'><i class='fa fa-ship'></i> {v['油輪']}</div>"
+        # 字級也直接寫在 inline style 當雙重保險，不只靠外部 CSS
+        tooltip_html = f"<div style='color:{label_color}; font-size:8px; line-height:1.1;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
         icon_hex = _MARKER_HEX.get(v["status"], "#1e88e5")
         coord_str = _format_coord(v["lat"], v["lon"])
         copy_text = _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str)
@@ -443,7 +617,15 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             {copy_btn_html}
         </div>
         """
-        folium.Marker(location=[v["lat"], v["map_lon"]], tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"), popup=folium.Popup(popup_html, max_width=280), icon=_ship_div_icon(icon_hex, v.get("heading", 0) or 0)).add_to(marker_cluster)
+        folium.Marker(
+            location=[v["lat"], v["map_lon"]],
+            tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
+            popup=folium.Popup(popup_html, max_width=280),
+            icon=_ship_div_icon(icon_hex, v.get("heading", 0) or 0),
+        ).add_to(marker_cluster)
+
+    # 🌟 讓永久顯示的船名標籤本身也能點擊開啟 popup
+    TooltipClickOpensPopup().add_to(marker_cluster)
 
     return st_folium(m, height=460, use_container_width=True, key="fleet_map", returned_objects=["last_object_clicked_tooltip"])
 
@@ -653,7 +835,7 @@ st.markdown('<div class="compact-title">🚢 船隊實時調度報表</div>', un
 df, parse_errors = load_all_data()
 
 # ==========================================
-# === 新增：為整個表格計算每個 IMO 的處理 ===
+# === 為整個表格計算每個 IMO 的處理狀態 ===
 # ==========================================
 if not df.empty and "IMO" in df.columns:
     final_statuses = []
@@ -693,16 +875,28 @@ if not df.empty and "IMO" in df.columns:
             
             comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
             canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
+
+            # 🌟 修正：原本這裡完全沒有檢查「同一個 IMO 之後有沒有更新的 APPROVED」，
+            # 導致重複預報時，舊的那筆 APPROVED 只要之後沒接到 COMPLETED/CANCELLED，
+            # 就會一直卡在 PLAN，即使實際上已經被新的預報取代了。
+            # 這裡補上：找出「日期嚴格晚於這一筆」的新 APPROVED，標記成 RESCHEDULE。
+            reschedule_ev = future_events[
+                (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
+                & (future_events['日期'] > t)
+            ]
             
             first_comp = comp_ev['日期'].min() if not comp_ev.empty else pd.NaT
             first_canc = canc_ev['日期'].min() if not canc_ev.empty else pd.NaT
+            first_reschedule = reschedule_ev['日期'].min() if not reschedule_ev.empty else pd.NaT
             
             cands = []
             if pd.notnull(first_comp): cands.append(("DONE", first_comp))
             if pd.notnull(first_canc): cands.append(("CANCEL(X)", first_canc))
+            if pd.notnull(first_reschedule): cands.append(("RESCHEDULE", first_reschedule))
             
             if not cands:
-                # 找不到未來的結案紀錄 -> 證明這單還在 PLAN，接著計算是否超過 14 天逾期
+                # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 證明這單還在 PLAN，
+                # 接著計算是否超過 14 天逾期
                 tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
                 now = pd.Timestamp.now(tz=tz_info)
                 if (now - t).days > 14:
@@ -710,7 +904,8 @@ if not df.empty and "IMO" in df.columns:
                 else:
                     final_statuses.append("PLAN")
             else:
-                # 找到結案紀錄 -> 以最先發生的結案狀態為主
+                # 找到的候選事件裡，取「最早發生」的那一個當作這筆紀錄的真正結局
+                # （例如：3天後被重新預報 vs 5天後才完成 -> 應該算 RESCHEDULE，不是 DONE）
                 final_statuses.append(min(cands, key=lambda x: x[1])[0])
             continue
             
@@ -756,10 +951,8 @@ if not df.empty:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         if st.session_state["selected_tanker"] not in tankers: st.session_state["selected_tanker"] = "全部"
         def _on_tanker_change():
-            # 使用 .get 檢查是否存在，避免崩潰
             if "tanker_select_widget" in st.session_state:
                 st.session_state["selected_tanker"] = st.session_state.tanker_select_widget
-        # 確保 key 名稱與上面的 session_state 一致，且在 selectbox 被建立時就已經定義好
         st.selectbox(
             "🚢 篩選油輪", 
             tankers, 
@@ -781,7 +974,6 @@ if not df.empty:
     with c4:
         search_kw = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋船名、IMO、主旨、內文...", key="main_search_input")
 
-    # 資料過濾邏輯
     mask = pd.Series([True] * len(df))
     if st.session_state["selected_tanker"] != "全部": mask &= (df["油輪"] == st.session_state["selected_tanker"])
     if sel_status != "全部": mask &= (df["狀態"] == sel_status)
@@ -789,7 +981,6 @@ if not df.empty:
         start_dt, end_dt = pd.to_datetime(sel_range[0]), pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
         mask &= (df["日期"] >= start_dt) & (df["日期"] <= end_dt)
 
-    # 處理關鍵字搜尋
     search_keywords = []
     if search_kw:
         search_cols = ["油輪", "狀態", "船名", "IMO", "呼號", "主旨", "原始內文"]
@@ -823,7 +1014,6 @@ if not df.empty:
                 st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件")
             st.rerun()
 
-    # 表格選取與重置邏輯
     if "df_key_counter" not in st.session_state: st.session_state.df_key_counter = 0
     DF_KEY = f"email_table_{st.session_state.df_key_counter}"
     if "sel_seq" not in st.session_state: st.session_state.sel_seq = {}   
@@ -843,12 +1033,12 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
-        # 🌟 在這裡加入「處理」欄位
         DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "處理", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
         def style_status(val):
             val_upper = str(val).upper().strip()
             if "OVERDUE" in val_upper: return "background-color: #ffcdd2; color: #b71c1c; font-weight: bold;"
+            elif "RESCHEDULE" in val_upper: return "background-color: rgba(120, 170, 230, 0.35); color: #1a4d8f; font-weight: bold;"
             elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(250, 225, 50, 0.3);"
             elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(255, 128, 128, 0.3);"
             elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3);"
@@ -865,7 +1055,6 @@ if not df.empty:
                     if kw.lower() in val_str: return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
             return ""
             
-        # 🌟 將樣式同時套用到「狀態」與「處理」這兩個欄位上
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["處理"]).apply(style_duplicate_imo, subset=["IMO"])
         if search_kw: styled_df = styled_df.map(style_search_match)
         
@@ -874,7 +1063,7 @@ if not df.empty:
             key=DF_KEY, height=500, column_config={
                 "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
                 "狀態": st.column_config.TextColumn("單信狀態", width="small"),
-                "處理": st.column_config.TextColumn("處理", width="small"), # 🌟 新欄位設定
+                "處理": st.column_config.TextColumn("處理", width="small"),
                 "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
             }
         )
