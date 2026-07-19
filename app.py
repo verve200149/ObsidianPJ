@@ -1116,13 +1116,16 @@ if not df.empty:
 
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "OVERDUE" in val_upper: return "background-color: #c62828; color: #ffffff; font-weight: bold;"
-            elif "EXTEND" in val_upper: return "background-color: #1565c0; color: #ffffff; font-weight: bold;"
-            elif "DONE-C" in val_upper: return "background-color: #00897b; color: #ffffff; font-weight: bold;"
-            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: #fb8c00; color: #ffffff; font-weight: bold;"
-            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: #e53935; color: #ffffff; font-weight: bold;"
-            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: #8e24aa; color: #ffffff; font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: #757575; color: #ffffff; font-weight: bold;"
+            # 0.5 透明度
+            if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: #ffffff; font-weight: bold;"
+            elif "EXTEND" in val_upper: return "background-color: rgba(21, 101, 192, 0.5); color: #ffffff; font-weight: bold;"
+            elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: #ffffff; font-weight: bold;"
+            # 0.8 透明度
+            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(251, 140, 0, 0.8); color: #ffffff; font-weight: bold;"
+            # 0.5 透明度
+            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: #ffffff; font-weight: bold;"
+            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: #ffffff; font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: #ffffff; font-weight: bold;"
             return ""
 
         valid_dup_indices = _compute_duplicate_pair_indices(display_df)
