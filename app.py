@@ -103,46 +103,51 @@ def _progress_bar(done, plan, width=8):
 # ⚙️ 核心狀態機與資料處理
 # ==========================================
 def get_imo_current_status(imo_group_df):
-    valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期", ascending=False)
+    """
+    分析每一張 APPROVED 訂單的最終結局：
+    1. 後續接 COMPLETED -> DONE
+    2. 後續接新的 APPROVED -> CANCEL(X)
+    3. 後續接 CANCEL 郵件 -> CANCEL(X)
+    """
+    valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期")
     if valid_df.empty: return None
 
-    last_app = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]["日期"].max()
-    last_done = valid_df[valid_df["狀態"].str.contains("COMPLETED", case=False, na=False)]["日期"].max()
-    last_cancel = valid_df[valid_df["狀態"].str.contains("CANCEL", case=False, na=False)]["日期"].max()
+    # 找出所有預報 (APPROVED)
+    apps = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]
+    
+    # 找出所有終結事件 (COMPLETED 或 CANCEL)
+    terminators = valid_df[valid_df["狀態"].str.contains("COMPLETED|CANCEL", case=False, regex=True)]
 
-    candidates = []
-    if pd.notnull(last_app): candidates.append(("PLAN", last_app))
-    if pd.notnull(last_done): candidates.append(("DONE", last_done))
-    if pd.notnull(last_cancel): candidates.append(("CANCELLED", last_cancel))
+    if apps.empty:
+        latest = valid_df.iloc[-1]
+        return {"current_status": "PENDING", "last_date": latest["日期"], "is_overdue": False, "vessel_name": latest["船名"], "subject": latest["主旨"]}
 
-    latest_row = valid_df.iloc[0]
+    # 取「最後一筆」預報作為當前焦點
+    latest_app = apps.iloc[-1]
+    app_time = latest_app["日期"]
+    
+    # 在這筆預報之後，發生了什麼事？
+    # 這裡加入：是否有「後續的預報」
+    future_apps = apps[apps["日期"] > app_time]
+    future_terms = terminators[terminators["日期"] > app_time]
+    
+    # 如果有後續預報，直接判定這張單被覆蓋
+    if not future_apps.empty:
+        return {"current_status": "CANCEL(X)", "last_date": future_apps.iloc[0]["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
-    if not candidates:
-        raw_status = str(latest_row["狀態"]).upper()
-        return {
-            "current_status": "PENDING" if "PENDING" in raw_status else raw_status,
-            "last_date": latest_row["日期"],
-            "is_overdue": False,
-            "vessel_name": latest_row["船名"],
-            "subject": latest_row["主旨"]
-        }
-
-    latest_status, latest_date = max(candidates, key=lambda x: x[1])
-
-    is_overdue = False
-    if latest_status == "PLAN":
-        tz_info = latest_date.tzinfo if hasattr(latest_date, 'tzinfo') else None
-        now = pd.Timestamp.now(tz=tz_info)
-        if (now - latest_date).days > 14:
-            is_overdue = True
-
-    return {
-        "current_status": latest_status,
-        "last_date": latest_date,
-        "is_overdue": is_overdue,
-        "vessel_name": latest_row["船名"],
-        "subject": latest_row["主旨"]
-    }
+    # 如果之後有結案事件，取最先發生的那一個
+    if not future_terms.empty:
+        first_term = future_terms.sort_values("日期").iloc[0]
+        term_status = str(first_term["狀態"]).upper()
+        
+        if "COMPLETED" in term_status:
+            return {"current_status": "DONE", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+        else:
+            return {"current_status": "CANCEL(X)", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+    
+    # 情況：之後什麼都沒有 -> 仍在進行中 (PLAN)
+    is_overdue = (pd.Timestamp.now(tz=app_time.tzinfo if hasattr(app_time, 'tzinfo') else None) - app_time).days > 14
+    return {"current_status": "PLAN", "last_date": app_time, "is_overdue": is_overdue, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_vessel_positions():
