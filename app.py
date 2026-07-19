@@ -549,6 +549,7 @@ def _tooltip_style(v):
 
 def _build_recent_orders_html(recent_orders, vessel_name):
     if not recent_orders: return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
+    
     def _item(o):
         status = str(o.get("狀態", "-")).upper()
         # 轉換回原本的習慣縮寫與 Icon
@@ -560,14 +561,43 @@ def _build_recent_orders_html(recent_orders, vessel_name):
         else: emoji, display = "📋", status
         
         ship = o.get("船名", "-") or "-"
+        imo = str(o.get("IMO", "")).strip()
+        
         dt = o.get("日期", pd.NaT)
         dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else ""
         dt_html = f"<span style='color:#888; font-size:11px;'>({dt_str})</span>" if dt_str else ""
-        return f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0; font-size:12px;">{emoji} <b>{display}</b> {dt_html} ・ {ship}</div>'
+        
+        # 決定要帶入的關鍵字：優先使用 IMO，如果沒有或無效，則使用船名
+        copy_target = imo if imo and imo not in ["-", "(本次無資料)", "nan"] else ship
+        safe_copy_target = copy_target.replace("'", "\\'")
+        
+        # 🌟 核心魔法：直接把關鍵字丟到上方的 Streamlit 搜尋框中，並自動加一格空白
+        js_script = (
+            f"var val = '{safe_copy_target}'; "
+            "var pDoc = window.parent.document; "
+            "var inputs = pDoc.querySelectorAll('input'); "
+            "var target = null; "
+            "for(var i=0; i<inputs.length; i++){ if(inputs[i].placeholder && inputs[i].placeholder.includes('搜尋')){ target=inputs[i]; break; } } "
+            "if(target) { "
+                "var cur = target.value || ''; "
+                "if(cur.indexOf(val) === -1) { " # 避免連續點擊同一筆造成重複
+                    "var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; "
+                    "var space = (cur && !cur.endsWith(' ')) ? ' ' : ''; "
+                    "setter.call(target, cur + space + val + ' '); "
+                    "target.dispatchEvent(new Event('input', {bubbles: true})); "
+                "} "
+            "} else { navigator.clipboard.writeText(val + ' '); } " # 找不到搜尋框的備用方案(複製到剪貼簿)
+            "var self = this; self.style.backgroundColor='#d2e3fc'; setTimeout(function(){self.style.backgroundColor='transparent';}, 400);"
+        )
+        
+        return f'<div style="padding:4px 2px; border-bottom:1px solid #f0f0f0; font-size:12px; cursor:pointer; transition: background-color 0.2s; border-radius:3px;" onclick="{js_script}" title="點擊帶入 IMO / 船名至搜尋框" onmouseover="this.style.backgroundColor=\'#f1f3f4\'" onmouseout="this.style.backgroundColor=\'transparent\'">{emoji} <b>{display}</b> {dt_html} ・ {ship}</div>'
     
     items = [_item(o) for o in recent_orders]
     total = len(items)
-    html_out = '<div style="margin-top:4px;">' + "".join(items[:3])
+    
+    # 加上提示字眼
+    html_out = '<div style="margin-top:4px;"><div style="font-size:10px; color:#1a73e8; margin-bottom:4px;">💡 點擊清單即可帶入上方搜尋框 (可連續疊加)</div>' + "".join(items[:3])
+    
     if total > 3:
         rest_html = "".join(items[3:])
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
