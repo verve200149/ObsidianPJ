@@ -614,7 +614,7 @@ def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
         for o in recent_orders:
             status = str(o.get("狀態", "-")).upper()
             if "OVERDUE" in status: display = "⚠️ OVERDUE"
-            elif "DONE-C" in status: display = "🏁 DONE"
+            elif "DONE-C" in status: display = "🏁 DONE-C"
             elif "PLAN" in status or "APPROVED" in status: display = "✅ APPD"
             elif "DONE" in status or "COMPLETED" in status: display = "🏁 CMP"
             elif "CANCEL" in status: display = "🚫 CANCEL"
@@ -623,8 +623,15 @@ def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
             ship = o.get("船名", "-") or "-"
             dt = o.get("日期", pd.NaT)
             dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else "-"
-            lines.append(f"  {display} ({dt_str}) - {ship}")
-    return "\n".join(lines)
+            
+            # 🌟 新增擷取 IMO 邏輯，並排除無效值
+            imo = str(o.get("IMO", "")).strip()
+            imo_str = f" [IMO: {imo}]" if imo and imo not in ["-", "(本次無資料)", "nan", ""] else ""
+            
+            lines.append(f"  {display} ({dt_str}) - {ship}{imo_str}")
+            
+    # 🌟 使用特定標記替換真實換行，避免 HTML 屬性把換行壓平
+    return "__NEWLINE__".join(lines)
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
     valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
