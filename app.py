@@ -312,13 +312,19 @@ def _tooltip_style(v):
 def _build_recent_orders_html(recent_orders, vessel_name):
     if not recent_orders: return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
     def _item(o):
-        status = o.get("狀態", "-") or "-"
-        display_status = "APPD" if "APPROVED" in str(status).upper() else status
+        status = str(o.get("狀態", "-")).upper()
+        # 轉換回原本的習慣縮寫與 Icon
+        if "OVERDUE" in status: emoji, display = "⚠️", "OVERDUE"
+        elif "PLAN" in status or "APPROVED" in status: emoji, display = "✅", "APPD"
+        elif "DONE" in status or "COMPLETED" in status: emoji, display = "🏁", "CMP"
+        elif "CANCEL" in status: emoji, display = "🚫", "CANCEL(X)"
+        else: emoji, display = "📋", status
+        
         ship = o.get("船名", "-") or "-"
         dt = o.get("日期", pd.NaT)
         dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else ""
         dt_html = f"<span style='color:#888; font-size:11px;'>({dt_str})</span>" if dt_str else ""
-        return f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0; font-size:12px;">{_status_emoji(status)} <b>{display_status}</b> {dt_html} ・ {ship}</div>'
+        return f'<div style="padding:2px 0; border-bottom:1px solid #f0f0f0; font-size:12px;">{emoji} <b>{display}</b> {dt_html} ・ {ship}</div>'
     
     items = [_item(o) for o in recent_orders]
     total = len(items)
@@ -345,12 +351,17 @@ def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
     if recent_orders:
         lines.append("近期訂單：")
         for o in recent_orders:
-            status = o.get("狀態", "-") or "-"
-            display_status = "APPD" if "APPROVED" in str(status).upper() else status
+            status = str(o.get("狀態", "-")).upper()
+            if "OVERDUE" in status: display = "⚠️ OVERDUE"
+            elif "PLAN" in status or "APPROVED" in status: display = "✅ APPD"
+            elif "DONE" in status or "COMPLETED" in status: display = "🏁 CMP"
+            elif "CANCEL" in status: display = "🚫 CANCEL(X)"
+            else: display = f"📋 {status}"
+            
             ship = o.get("船名", "-") or "-"
             dt = o.get("日期", pd.NaT)
             dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else "-"
-            lines.append(f"  {display_status} ({dt_str}) - {ship}")
+            lines.append(f"  {display} ({dt_str}) - {ship}")
     return "\n".join(lines)
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
@@ -618,6 +629,27 @@ st.markdown('<div class="compact-title">🚢 船隊實時調度報表</div>', un
 
 df, parse_errors = load_all_data()
 
+# ==========================================
+# === 新增：為整個表格計算每個 IMO 的最終狀態 ===
+# ==========================================
+if not df.empty and "IMO" in df.columns:
+    valid_imo_df = df[~df['IMO'].isin(['-', '', '(本次無資料)'])]
+    imo_status_map = {}
+    for imo, group in valid_imo_df.groupby('IMO'):
+        st_info = get_imo_current_status(group)
+        if st_info:
+            c_status = st_info["current_status"]
+            # 判斷是否為逾期
+            if c_status == "PLAN" and st_info["is_overdue"]:
+                imo_status_map[imo] = "OVERDUE"
+            else:
+                imo_status_map[imo] = c_status
+    
+    # 建立新欄位「最終狀態」對應回去
+    df["最終狀態"] = df["IMO"].map(lambda x: imo_status_map.get(x, "-"))
+else:
+    df["最終狀態"] = "-"
+
 if parse_errors:
     with st.sidebar.expander(f"⚠️ 解析失敗的信件 ({len(parse_errors)} 筆)"):
         for fpath, err in parse_errors:
@@ -730,13 +762,15 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
-        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
+        # 🌟 在這裡加入「最終狀態」欄位
+        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "最終狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
         def style_status(val):
             val_upper = str(val).upper().strip()
-            if "APPROVED" in val_upper: return "background-color: rgba(250, 225, 50, 0.3);"
-            elif "COMPLETED" in val_upper: return "background-color: rgba(255, 128, 128, 0.3);"
-            elif "CANCELLED" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3);"
+            if "OVERDUE" in val_upper: return "background-color: #ffcdd2; color: #b71c1c; font-weight: bold;"
+            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(250, 225, 50, 0.3);"
+            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(255, 128, 128, 0.3);"
+            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3);"
             elif "PENDING" in val_upper: return "background-color: rgba(255, 243, 205, 0.3);"
             return ""
 
@@ -750,14 +784,16 @@ if not df.empty:
                     if kw.lower() in val_str: return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
             return ""
             
-        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"]).apply(style_duplicate_imo, subset=["IMO"])
+        # 🌟 將樣式同時套用到「狀態」與「最終狀態」這兩個欄位上
+        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態", "最終狀態"]).apply(style_duplicate_imo, subset=["IMO"])
         if search_kw: styled_df = styled_df.map(style_search_match)
         
         event = st.dataframe(
             styled_df, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row",
             key=DF_KEY, height=500, column_config={
                 "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
-                "狀態": st.column_config.TextColumn("狀態", width="small"),
+                "狀態": st.column_config.TextColumn("單信狀態", width="small"),
+                "最終狀態": st.column_config.TextColumn("最終狀態", width="small"), # 🌟 新欄位設定
                 "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
             }
         )
