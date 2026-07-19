@@ -630,7 +630,7 @@ st.markdown('<div class="compact-title">🚢 船隊實時調度報表</div>', un
 df, parse_errors = load_all_data()
 
 # ==========================================
-# === 新增：為整個表格計算每個 IMO 的最終狀態 ===
+# === 新增：為整個表格計算每個 IMO 的處理 ===
 # ==========================================
 if not df.empty and "IMO" in df.columns:
     valid_imo_df = df[~df['IMO'].isin(['-', '', '(本次無資料)'])]
@@ -645,10 +645,10 @@ if not df.empty and "IMO" in df.columns:
             else:
                 imo_status_map[imo] = c_status
     
-    # 建立新欄位「最終狀態」對應回去
-    df["最終狀態"] = df["IMO"].map(lambda x: imo_status_map.get(x, "-"))
+    # 建立新欄位「處理」對應回去
+    df["處理"] = df["IMO"].map(lambda x: imo_status_map.get(x, "-"))
 else:
-    df["最終狀態"] = "-"
+    df["處理"] = "-"
 
 if parse_errors:
     with st.sidebar.expander(f"⚠️ 解析失敗的信件 ({len(parse_errors)} 筆)"):
@@ -762,8 +762,8 @@ if not df.empty:
         preview_cols = [col_preview1, col_preview2]
 
     with col_list:
-        # 🌟 在這裡加入「最終狀態」欄位
-        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "最終狀態", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
+        # 🌟 在這裡加入「處理」欄位
+        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "處理", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
 
         def style_status(val):
             val_upper = str(val).upper().strip()
@@ -784,8 +784,8 @@ if not df.empty:
                     if kw.lower() in val_str: return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
             return ""
             
-        # 🌟 將樣式同時套用到「狀態」與「最終狀態」這兩個欄位上
-        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態", "最終狀態"]).apply(style_duplicate_imo, subset=["IMO"])
+        # 🌟 將樣式同時套用到「狀態」與「處理」這兩個欄位上
+        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態", "處理"]).apply(style_duplicate_imo, subset=["IMO"])
         if search_kw: styled_df = styled_df.map(style_search_match)
         
         event = st.dataframe(
@@ -793,7 +793,7 @@ if not df.empty:
             key=DF_KEY, height=500, column_config={
                 "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
                 "狀態": st.column_config.TextColumn("單信狀態", width="small"),
-                "最終狀態": st.column_config.TextColumn("最終狀態", width="small"), # 🌟 新欄位設定
+                "處理": st.column_config.TextColumn("處理", width="small"), # 🌟 新欄位設定
                 "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
             }
         )
