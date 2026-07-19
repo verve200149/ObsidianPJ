@@ -216,15 +216,21 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
     
     for _, v in vessel_pos_df.iterrows():
         email_local = str(v.get("email_local", "")).strip().lower()
-        if email_local: vdf = grouped.get(email_local, empty_df)
-        else: vdf = df[df["油輪"] == v["油輪"]]
+        if email_local:
+            vdf = grouped.get(email_local, empty_df)
+        else:
+            vdf = df[df["油輪"] == v["油輪"]]
 
         matched = not vdf.empty
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
+        
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
+        # ==========================================
+        # 統計邏輯 (已刪除舊的配對邏輯，使用新的狀態機)
+        # ==========================================
         plan_count = 0
         done_count = 0
         overdue_count = 0
@@ -232,45 +238,54 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         recent_orders = []
 
         if 'IMO' in vdf.columns:
-        valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-        
-        # 使用狀態機為每一個 IMO 算出最終狀態
-        for imo, group in valid_imo_df.groupby('IMO'):
-            info = get_imo_current_status(group) # 呼叫你剛剛定義的那個函式
-            if not info: continue
+            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
             
-            c_status = info["current_status"]
-            is_overdue = info["is_overdue"]
-            
-            # 統計計數器
-            if c_status == "PLAN":
-                plan_count += 1
-                ready_count += 1
-                if is_overdue: overdue_count += 1
-            elif c_status == "DONE":
-                done_count += 1
+            # 使用狀態機進行統計
+            imo_states = {}
+            for imo, group in valid_imo_df.groupby('IMO'):
+                status_info = get_imo_current_status(group)
+                if status_info:
+                    imo_states[imo] = status_info
 
-            # 準備近期訂單列表 (5天內或仍在進行中的)
-            tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
-            cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
-            if c_status == "PLAN" or info["last_date"] >= cutoff:
-                display_status = "OVERDUE ⚠️" if is_overdue else c_status
-                recent_orders.append({
-                    "狀態": display_status,
-                    "日期": info["last_date"],
-                    "船名": info["vessel_name"],
-                    "IMO": imo
-                })
-        
-        recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
+            for imo, info in imo_states.items():
+                c_status = info["current_status"]
+                is_overdue = info["is_overdue"]
+                
+                if c_status == "PLAN":
+                    plan_count += 1
+                    ready_count += 1
+                    if is_overdue: overdue_count += 1
+                elif c_status == "DONE":
+                    done_count += 1
+
+                # 準備近期訂單列表
+                tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
+                cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
+                
+                if c_status == "PLAN" or info["last_date"] >= cutoff:
+                    display_status = "OVERDUE ⚠️" if is_overdue else c_status
+                    recent_orders.append({
+                        "狀態": display_status,
+                        "日期": info["last_date"],
+                        "船名": info["vessel_name"],
+                        "IMO": imo
+                    })
+
+            recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
 
         row = v.to_dict()
         row.update({
-            "matched": matched, "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
-            "ready_count": ready_count, "plan_count": plan_count, "done_count": done_count,
-            "overdue_count": overdue_count, "completed_count": completed_count,
-            "total_orders": len(vdf), "latest_subject": latest_subject,
-            "latest_date": latest_date, "recent_orders": recent_orders,
+            "matched": matched,
+            "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
+            "ready_count": ready_count,
+            "plan_count": plan_count,
+            "done_count": done_count,
+            "overdue_count": overdue_count,
+            "completed_count": completed_count,
+            "total_orders": len(vdf),
+            "latest_subject": latest_subject,
+            "latest_date": latest_date,
+            "recent_orders": recent_orders,
         })
         summary_rows.append(row)
         
