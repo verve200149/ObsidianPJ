@@ -785,7 +785,7 @@ if not df.empty:
             return ""
             
         # 🌟 將樣式同時套用到「狀態」與「處理」這兩個欄位上
-        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態", "處理"]).apply(style_duplicate_imo, subset=["IMO"])
+        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["處理"]).apply(style_duplicate_imo, subset=["IMO"])
         if search_kw: styled_df = styled_df.map(style_search_match)
         
         event = st.dataframe(
