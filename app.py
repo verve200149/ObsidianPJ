@@ -595,8 +595,8 @@ def _build_recent_orders_html(recent_orders, vessel_name):
     items = [_item(o) for o in recent_orders]
     total = len(items)
     
-    # 加上提示字眼
-    html_out = '<div style="margin-top:4px;"><div style="font-size:10px; color:#1a73e8; margin-bottom:4px;">💡 點擊清單即可帶入上方搜尋框 (可連續疊加)</div>' + "".join(items[:3])
+    # 拿掉提示字眼，保留外層容器
+    html_out = '<div style="margin-top:4px;">' + "".join(items[:3])
     
     if total > 3:
         rest_html = "".join(items[3:])
