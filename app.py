@@ -633,20 +633,68 @@ df, parse_errors = load_all_data()
 # === 新增：為整個表格計算每個 IMO 的處理 ===
 # ==========================================
 if not df.empty and "IMO" in df.columns:
-    valid_imo_df = df[~df['IMO'].isin(['-', '', '(本次無資料)'])]
-    imo_status_map = {}
-    for imo, group in valid_imo_df.groupby('IMO'):
-        st_info = get_imo_current_status(group)
-        if st_info:
-            c_status = st_info["current_status"]
-            # 判斷是否為逾期
-            if c_status == "PLAN" and st_info["is_overdue"]:
-                imo_status_map[imo] = "OVERDUE"
-            else:
-                imo_status_map[imo] = c_status
+    final_statuses = []
     
-    # 建立新欄位「處理」對應回去
-    df["處理"] = df["IMO"].map(lambda x: imo_status_map.get(x, "-"))
+    # 預先 Group 提升效能
+    grouped_df = df.groupby('IMO')
+    
+    for idx, row in df.iterrows():
+        imo = row.get("IMO")
+        raw_status = str(row.get('狀態', '-')).upper()
+        
+        # 1. 無效 IMO 或本身就是結案狀態，直接給予對應狀態
+        if pd.isna(imo) or imo in ['-', '', '(本次無資料)']:
+            if "COMPLETED" in raw_status: final_statuses.append("DONE")
+            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL(X)")
+            elif "APPROVED" in raw_status: final_statuses.append("PLAN")
+            else: final_statuses.append(raw_status)
+            continue
+            
+        if "COMPLETED" in raw_status: 
+            final_statuses.append("DONE")
+            continue
+        if "CANCEL" in raw_status or "KYC" in raw_status:
+            final_statuses.append("CANCEL(X)")
+            continue
+            
+        # 2. 核心邏輯：如果這封信是 APPROVED，則「往未來的時間」尋找是否有結案紀錄
+        if "APPROVED" in raw_status or "PLAN" in raw_status:
+            t = row['日期']
+            if pd.isna(t):
+                final_statuses.append("PLAN")
+                continue
+                
+            imo_group = grouped_df.get_group(imo)
+            # 🌟 關鍵：只看這封信「時間點之後」發生的歷史
+            future_events = imo_group[imo_group['日期'] >= t]
+            
+            comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
+            canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
+            
+            first_comp = comp_ev['日期'].min() if not comp_ev.empty else pd.NaT
+            first_canc = canc_ev['日期'].min() if not canc_ev.empty else pd.NaT
+            
+            cands = []
+            if pd.notnull(first_comp): cands.append(("DONE", first_comp))
+            if pd.notnull(first_canc): cands.append(("CANCEL(X)", first_canc))
+            
+            if not cands:
+                # 找不到未來的結案紀錄 -> 證明這單還在 PLAN，接著計算是否超過 14 天逾期
+                tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
+                now = pd.Timestamp.now(tz=tz_info)
+                if (now - t).days > 14:
+                    final_statuses.append("OVERDUE")
+                else:
+                    final_statuses.append("PLAN")
+            else:
+                # 找到結案紀錄 -> 以最先發生的結案狀態為主
+                final_statuses.append(min(cands, key=lambda x: x[1])[0])
+            continue
+            
+        # 其他狀態 (如 PENDING) 原樣輸出
+        final_statuses.append(raw_status)
+        
+    df["處理"] = final_statuses
 else:
     df["處理"] = "-"
 
