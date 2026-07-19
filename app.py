@@ -136,72 +136,95 @@ def _find_column(columns, candidates):
     return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_vessel_positions():
-    csv_url = (
-        f"https://docs.google.com/spreadsheets/d/{VMS_SPREADSHEET_ID}"
-        f"/export?format=csv&gid={VMS_VESSELDATA_GID}"
-    )
-    try:
-        raw = pd.read_csv(csv_url)
-    except Exception as e:
-        st.sidebar.error(f"⚠️ 無法讀取船位資料（VesselData）：{e}")
-        return pd.DataFrame()
+@st.cache_data(ttl=60, show_spinner=False)
+def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
+    if vessel_pos_df.empty: return vessel_pos_df
 
-    col_name = _find_column(raw.columns, ["vessel name", "vessel", "name"])
-    col_last_signal = _find_column(raw.columns, ["last signal", "signal"])
-    col_location = _find_column(raw.columns, ["location", "position"])
-    col_speed = _find_column(raw.columns, ["speed/direction", "speed", "direction"])
-    col_validity = _find_column(raw.columns, ["validity"])
-    col_remark = _find_column(raw.columns, ["remark"])
-    col_email = _find_column(raw.columns, ["email", "e-mail", "mail"])
+    df = df.copy()
+    df["_key"] = df["油輪"].astype(str).str.strip().str.lower()
+    grouped = dict(tuple(df.groupby("_key")))
+    empty_df = df.iloc[0:0] 
 
-    if col_name is None or col_last_signal is None:
-        return pd.DataFrame()
+    summary_rows = []
+    
+    for _, v in vessel_pos_df.iterrows():
+        email_local = str(v.get("email_local", "")).strip().lower()
+        if email_local:
+            vdf = grouped.get(email_local, empty_df)
+        else:
+            vdf = df[df["油輪"] == v["油輪"]]
 
-    now = datetime.now(TAIPEI_TZ)
-    rows = []
-    for _, r in raw.iterrows():
-        vessel_name = str(r[col_name]).strip() if pd.notna(r[col_name]) else ""
-        if not vessel_name: continue
+        matched = not vdf.empty
+        completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
+        
+        latest = vdf.sort_values("日期", ascending=False).head(1)
+        latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
+        latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
-        last_signal = _parse_custom_date(r[col_last_signal])
-        if not last_signal: continue
+        # ==========================================
+        # 統一使用「狀態機」進行判定與統計
+        # ==========================================
+        plan_count = 0
+        done_count = 0
+        overdue_count = 0
+        ready_count = 0 
+        recent_orders = []
 
-        pos = _parse_position(r[col_location]) if col_location and pd.notna(r[col_location]) else None
-        speed_info = _parse_speed_field(r[col_speed]) if col_speed and pd.notna(r[col_speed]) else {"speed": 0, "heading": 0}
-        validity = str(r[col_validity]) if col_validity and pd.notna(r[col_validity]) else "0/6"
-        valid_count = int(validity.split('/')[0]) if '/' in validity and validity.split('/')[0].isdigit() else 0
-        remark = str(r[col_remark]) if col_remark and pd.notna(r[col_remark]) else ""
+        if 'IMO' in vdf.columns:
+            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+            
+            imo_states = {}
+            for imo, group in valid_imo_df.groupby('IMO'):
+                status_info = get_imo_current_status(group)
+                if status_info:
+                    imo_states[imo] = status_info
 
-        email_raw = str(r[col_email]).strip().lower() if col_email and pd.notna(r[col_email]) else ""
-        email_local = email_raw.split('@')[0].strip() if '@' in email_raw else email_raw
+            for imo, info in imo_states.items():
+                c_status = info["current_status"]
+                is_overdue = info["is_overdue"]
+                
+                if c_status == "PLAN":
+                    plan_count += 1
+                    ready_count += 1
+                    if is_overdue:
+                        overdue_count += 1
+                elif c_status == "DONE":
+                    done_count += 1
 
-        signal_hours = (now - last_signal).total_seconds() / 3600
-        no_signal = signal_hours > SIGNAL_LIMIT_HOURS
-        warning = (not no_signal) and valid_count <= 2
+                tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
+                cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
+                
+                # 顯示規則：所有未完成的 PLAN (含逾期) + 近五天內結案的單
+                if c_status == "PLAN" or info["last_date"] >= cutoff:
+                    display_status = "OVERDUE ⚠️" if is_overdue else c_status
+                    
+                    recent_orders.append({
+                        "狀態": display_status,
+                        "日期": info["last_date"],
+                        "船名": info["vessel_name"],
+                        "IMO": imo
+                    })
 
-        if no_signal: status = "🔴 No Signal"
-        elif warning: status = "🟡 Weak"
-        else: status = "🟢 Normal"
+            # 依日期降冪排序 (最新的在最上面)
+            recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
 
-        rows.append({
-            "油輪": vessel_name,
-            "email": email_raw,
-            "email_local": email_local,
-            "lat": pos["lat"] if pos else None,
-            "lon": pos["lon"] if pos else None,
-            "speed": speed_info["speed"],
-            "heading": speed_info["heading"],
-            "last_signal": last_signal,
-            "signal_hours": round(signal_hours, 1),
-            "validity": validity,
-            "remark": remark,
-            "no_signal": no_signal,
-            "warning": warning,
-            "status": status,
+        row = v.to_dict()
+        row.update({
+            "matched": matched,
+            "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
+            "ready_count": ready_count,
+            "plan_count": plan_count,
+            "done_count": done_count,
+            "overdue_count": overdue_count,
+            "completed_count": completed_count,
+            "total_orders": len(vdf),
+            "latest_subject": latest_subject,
+            "latest_date": latest_date,
+            "recent_orders": recent_orders,
         })
-    return pd.DataFrame(rows)
+        summary_rows.append(row)
+        
+    return pd.DataFrame(summary_rows)
 
 # ==========================================
 # ⚙️ 核心狀態機：計算單一 IMO 的最終商業狀態
