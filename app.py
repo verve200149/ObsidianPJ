@@ -1119,7 +1119,7 @@ if not df.empty:
             
             # 0.5 透明度背景 + 0.6 透明度字體
             if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            elif "EXTEND" in val_upper: return "background-color: rgba(21, 101, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "EXTEND" in val_upper: return "background-color: rgba(92, 107, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             
             # PLAN 保持 0.8 背景 + 實心純白字體 (最顯眼)
