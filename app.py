@@ -927,6 +927,32 @@ df, parse_errors = load_all_data()
 # ==========================================
 # === 為整個表格計算每個 IMO 的處理狀態 ===
 # ==========================================
+if not df.empty and "IMO" in df.columns:
+    final_statuses = []
+    
+    # 預先 Group 提升效能
+    grouped_df = df.groupby('IMO')
+    
+    for idx, row in df.iterrows():
+        imo = row.get("IMO")
+        raw_status = str(row.get('狀態', '-')).upper()
+        
+        # 1. 無效 IMO 或本身就是結案狀態，直接給予對應狀態
+        if pd.isna(imo) or imo in ['-', '', '(本次無資料)']:
+            if "COMPLETED" in raw_status: final_statuses.append("DONE")
+            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL")
+            elif "APPROVED" in raw_status: final_statuses.append("PLAN")
+            else: final_statuses.append(raw_status)
+            continue
+            
+        if "COMPLETED" in raw_status: 
+            final_statuses.append("DONE")
+            continue
+        if "CANCEL" in raw_status or "KYC" in raw_status:
+            final_statuses.append("CANCEL")
+            continue
+            
+        # 2. 核心邏輯：如果這封信是 APPROVED，則「往未來的時間」尋找是否有結案紀錄
         if "APPROVED" in raw_status or "PLAN" in raw_status:
             
             # 🌟 絕對優先權：先檢查手動屬性，如果有 clear 直接強制歸類為 DONE-C，不看後續歷史
@@ -939,36 +965,6 @@ df, parse_errors = load_all_data()
             if pd.isna(t):
                 final_statuses.append("PLAN")
                 continue
-                
-            imo_group = grouped_df.get_group(imo)
-            future_events = imo_group[imo_group['日期'] >= t]
-            
-            comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
-            canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
-            reschedule_ev = future_events[
-                (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
-                & (future_events['日期'] > t)
-            ]
-            
-            first_comp = comp_ev['日期'].min() if not comp_ev.empty else pd.NaT
-            first_canc = canc_ev['日期'].min() if not canc_ev.empty else pd.NaT
-            first_reschedule = reschedule_ev['日期'].min() if not reschedule_ev.empty else pd.NaT
-            
-            cands = []
-            if pd.notnull(first_comp): cands.append(("DONE", first_comp))
-            if pd.notnull(first_canc): cands.append(("CANCEL", first_canc))
-            if pd.notnull(first_reschedule): cands.append(("EXTEND", first_reschedule))
-            
-            if not cands:
-                tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
-                now = pd.Timestamp.now(tz=tz_info)
-                if (now - t).days > 14:
-                    final_statuses.append("OVERDUE")
-                else:
-                    final_statuses.append("PLAN")
-            else:
-                final_statuses.append(min(cands, key=lambda x: x[1])[0])
-            continue
                 
             imo_group = grouped_df.get_group(imo)
             # 🌟 關鍵：只看這封信「時間點之後」發生的歷史
@@ -997,23 +993,15 @@ df, parse_errors = load_all_data()
             
             if not cands:
                 # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 原本會判定成 PLAN。
-                # 🌟 手動關閉機制：先檢查這封信的 status 有沒有被人工從 pending
-                # 改成 clear——如果有，代表業務上已經確認結束了（等不到 COMPLETED
-                # 通知的情況），直接判定 WELL，不用再算逾期。
-                manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
-                if manual_status == 'clear':
-                    final_statuses.append("WELL")
+                # 接著計算是否超過 14 天逾期
+                tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
+                now = pd.Timestamp.now(tz=tz_info)
+                if (now - t).days > 14:
+                    final_statuses.append("OVERDUE")
                 else:
-                    # 接著計算是否超過 14 天逾期
-                    tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
-                    now = pd.Timestamp.now(tz=tz_info)
-                    if (now - t).days > 14:
-                        final_statuses.append("OVERDUE")
-                    else:
-                        final_statuses.append("PLAN")
+                    final_statuses.append("PLAN")
             else:
                 # 找到的候選事件裡，取「最早發生」的那一個當作這筆紀錄的真正結局
-                # （例如：3天後被重新預報 vs 5天後才完成 -> 應該算 EXTEND，不是 DONE）
                 final_statuses.append(min(cands, key=lambda x: x[1])[0])
             continue
             
