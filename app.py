@@ -732,8 +732,18 @@ if not df.empty:
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         if st.session_state["selected_tanker"] not in tankers: st.session_state["selected_tanker"] = "全部"
-        def _on_tanker_change(): st.session_state["selected_tanker"] = st.session_state.tanker_select_widget
-        st.selectbox("🚢 篩選油輪", tankers, index=tankers.index(st.session_state["selected_tanker"]), key="tanker_select_widget", on_change=_on_tanker_change)
+        def _on_tanker_change():
+            # 使用 .get 檢查是否存在，避免崩潰
+            if "tanker_select_widget" in st.session_state:
+                st.session_state["selected_tanker"] = st.session_state.tanker_select_widget
+        # 確保 key 名稱與上面的 session_state 一致，且在 selectbox 被建立時就已經定義好
+        st.selectbox(
+            "🚢 篩選油輪", 
+            tankers, 
+            index=tankers.index(st.session_state["selected_tanker"]) if st.session_state["selected_tanker"] in tankers else 0,
+            key="tanker_select_widget",
+            on_change=_on_tanker_change
+        )
         
     with c2:
         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
@@ -746,7 +756,7 @@ if not df.empty:
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
         
     with c4:
-        search_kw = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋船名、IMO、主旨、內文...")
+        search_kw = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋船名、IMO、主旨、內文...", key="main_search_input")
 
     # 資料過濾邏輯
     mask = pd.Series([True] * len(df))
