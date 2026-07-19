@@ -599,23 +599,23 @@ def _build_recent_orders_html(recent_orders, vessel_name):
     return html_out
 
 def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
-    # 第一部分：船的基本資訊 (為了讓這些也進 Excel，我們同樣用 Tab 分隔)
+    # 第一部分：船的基本資訊 (維持不變)
     lines = [
         f"{v['油輪']}",
         f"位置\t{coord_str}",
         f"航向/航速\t{v['heading']:.0f}° / {v['speed']:.1f}kn",
         f"最後訊號\t{last_signal_str}",
         "近期訂單：",
-        # 標題列：狀態 \t 日期 \t IMO \t 船名
-        "狀態\t日期\tIMO\t船名" 
+        # 標題列：狀態-船名 \t IMO
+        "狀態-船名\tIMO" 
     ]
     
-    # 第二部分：訂單明細 (使用 \t Tab 分隔)
+    # 第二部分：訂單明細
     recent_orders = v.get("recent_orders", []) or []
     for o in recent_orders:
         status = str(o.get("狀態", "-")).upper()
         
-        # 狀態簡化
+        # 狀態簡化 (與 UI 顯示邏輯一致)
         if "OVERDUE" in status: display = "OVERDUE"
         elif "DONE-C" in status: display = "DONE-C"
         elif "PLAN" in status or "APPROVED" in status: display = "APPD"
@@ -625,13 +625,14 @@ def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
         
         ship = o.get("船名", "-") or "-"
         dt = o.get("日期", pd.NaT)
-        dt_str = dt.strftime('%Y/%m/%d') if pd.notnull(dt) else "-"
+        dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else "-"
         imo = str(o.get("IMO", "")).strip()
+        imo_val = imo if imo and imo not in ["-", "(本次無資料)", "nan", ""] else ""
         
-        # 格式：狀態 [Tab] 日期 [Tab] IMO [Tab] 船名
-        lines.append(f"{display}\t{dt_str}\t{imo}\t{ship}")
+        # 🌟 核心修改：A 欄位為「狀態(日期)-船名」，B 欄位為「IMO」，中間用 Tab 分隔
+        lines.append(f"{display} ({dt_str}) - {ship}\t{imo_val}")
             
-    # 使用 __NEWLINE__ 佔位符，最後由 JS 轉為真實換行
+    # 使用 __NEWLINE__ 佔位符
     return "__NEWLINE__".join(lines)
 
 def render_fleet_map(vessel_summary_df: pd.DataFrame):
