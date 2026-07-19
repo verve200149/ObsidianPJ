@@ -106,7 +106,7 @@ def get_imo_current_status(imo_group_df):
     """
     分析每一張 APPROVED 訂單的最終結局：
     1. 後續接 COMPLETED -> DONE
-    2. 後續接新的 APPROVED -> CANCEL(X)
+    2. 後續接新的 APPROVED -> COVER(X)
     3. 後續接 CANCEL 郵件 -> CANCEL(X)
     """
     valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期")
@@ -232,34 +232,37 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         recent_orders = []
 
         if 'IMO' in vdf.columns:
-            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-            imo_states = {}
-            for imo, group in valid_imo_df.groupby('IMO'):
-                status_info = get_imo_current_status(group)
-                if status_info: imo_states[imo] = status_info
+        valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+        
+        # 使用狀態機為每一個 IMO 算出最終狀態
+        for imo, group in valid_imo_df.groupby('IMO'):
+            info = get_imo_current_status(group) # 呼叫你剛剛定義的那個函式
+            if not info: continue
+            
+            c_status = info["current_status"]
+            is_overdue = info["is_overdue"]
+            
+            # 統計計數器
+            if c_status == "PLAN":
+                plan_count += 1
+                ready_count += 1
+                if is_overdue: overdue_count += 1
+            elif c_status == "DONE":
+                done_count += 1
 
-            for imo, info in imo_states.items():
-                c_status = info["current_status"]
-                is_overdue = info["is_overdue"]
-                
-                if c_status == "PLAN":
-                    plan_count += 1
-                    ready_count += 1
-                    if is_overdue: overdue_count += 1
-                elif c_status == "DONE":
-                    done_count += 1
-
-                tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
-                cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
-                
-                if c_status == "PLAN" or info["last_date"] >= cutoff:
-                    display_status = "OVERDUE ⚠️" if is_overdue else c_status
-                    recent_orders.append({
-                        "狀態": display_status, "日期": info["last_date"],
-                        "船名": info["vessel_name"], "IMO": imo
-                    })
-
-            recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
+            # 準備近期訂單列表 (5天內或仍在進行中的)
+            tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
+            cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
+            if c_status == "PLAN" or info["last_date"] >= cutoff:
+                display_status = "OVERDUE ⚠️" if is_overdue else c_status
+                recent_orders.append({
+                    "狀態": display_status,
+                    "日期": info["last_date"],
+                    "船名": info["vessel_name"],
+                    "IMO": imo
+                })
+        
+        recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
 
         row = v.to_dict()
         row.update({
