@@ -102,7 +102,6 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 VMS_SPREADSHEET_ID = "1wwFluz-H4-r7HRKya1AUZ_2KyZ6bVow_2v-TBqXj46c"
 VMS_VESSELDATA_GID = "1420495034"  
 
-
 def _parse_custom_date(s):
     m = re.match(r'^(\d{4})(\d{2})(\d{2}) (\d{2}):(\d{2})$', str(s or "").strip())
     if not m: return None
@@ -204,6 +203,59 @@ def load_vessel_positions():
         })
     return pd.DataFrame(rows)
 
+# ==========================================
+# ⚙️ 核心狀態機：計算單一 IMO 的最終商業狀態
+# ==========================================
+def get_imo_current_status(imo_group_df):
+    """
+    傳入單一 IMO 的所有歷史信件 (DataFrame)，
+    回傳該 IMO 最終的 Current Status 與相關資訊。
+    """
+    # 確保有日期且依時間排序 (最新在最上面)
+    valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期", ascending=False)
+    if valid_df.empty:
+        return None
+
+    # 尋找各原始狀態的最新發生時間
+    last_app = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]["日期"].max()
+    last_done = valid_df[valid_df["狀態"].str.contains("COMPLETED", case=False, na=False)]["日期"].max()
+    last_cancel = valid_df[valid_df["狀態"].str.contains("CANCEL", case=False, na=False)]["日期"].max()
+
+    candidates = []
+    if pd.notnull(last_app): candidates.append(("PLAN", last_app))
+    if pd.notnull(last_done): candidates.append(("DONE", last_done))
+    if pd.notnull(last_cancel): candidates.append(("CANCELLED", last_cancel))
+
+    latest_row = valid_df.iloc[0] # 最新的一封信
+
+    # 處理如果完全沒有這三種主力狀態時 (例如全是 PENDING 或 KYC 未通過)
+    if not candidates:
+        raw_status = str(latest_row["狀態"]).upper()
+        return {
+            "current_status": "PENDING" if "PENDING" in raw_status else raw_status,
+            "last_date": latest_row["日期"],
+            "is_overdue": False,
+            "vessel_name": latest_row["船名"],
+            "subject": latest_row["主旨"]
+        }
+
+    # 取出發生時間最晚的那個，作為最終商業狀態
+    latest_status, latest_date = max(candidates, key=lambda x: x[1])
+
+    # 🚨 逾期邏輯 (Overdue)：如果是 PLAN 狀態，且超過 14 天未結案
+    is_overdue = False
+    if latest_status == "PLAN":
+        now = pd.Timestamp.now(tz=latest_date.tzinfo)
+        if (now - latest_date).days > 14:
+            is_overdue = True
+
+    return {
+        "current_status": latest_status,
+        "last_date": latest_date,
+        "is_overdue": is_overdue,
+        "vessel_name": latest_row["船名"],
+        "subject": latest_row["主旨"]
+    }
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
@@ -228,116 +280,53 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
-        latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
+       latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
-        paired_indices = set()
-        
-        if 'IMO' in vdf.columns:
-            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-            for imo, group in valid_imo_df.groupby('IMO'):
-                approves = group[group['狀態'].str.contains('APPROVED', case=False, na=False)]
-                completes = group[group['狀態'].str.contains('COMPLETED', case=False, na=False)]
-                if not approves.empty and not completes.empty:
-                    for a_idx, a_row in approves.iterrows():
-                        for c_idx, c_row in completes.iterrows():
-                            if pd.notnull(a_row['日期']) and pd.notnull(c_row['日期']):
-                                diff = c_row['日期'] - a_row['日期']
-                                if pd.Timedelta(0) <= diff <= pd.Timedelta(days=7):
-                                    paired_indices.add(a_idx)
-                                    paired_indices.add(c_idx)
-        active_vdf = vdf.drop(index=list(paired_indices)).copy()
-
-        active_vdf["日期"] = pd.to_datetime(active_vdf["日期"], errors='coerce')
-        valid_date_vdf = active_vdf.dropna(subset=["日期"])
-        
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=5)
-        recent_active = valid_date_vdf[valid_date_vdf["日期"] >= cutoff].copy()
-        
-        cancelled_imos = set()
-        if 'IMO' in vdf.columns:
-            cancelled_imos = set(
-                vdf.loc[vdf['狀態'].str.contains('CANCEL', case=False, na=False), 'IMO']
-            )
-
-        ready_count = 0
-        if not recent_active.empty and 'IMO' in recent_active.columns:
-            ready_df = recent_active[
-                (~recent_active['IMO'].isin(['-', '', '(本次無資料)'])) &
-                (~recent_active['IMO'].isin(cancelled_imos)) &
-                (recent_active["狀態"].str.contains("APPROVED", case=False, na=False))
-            ]
-            ready_count = int(ready_df['IMO'].nunique())
-
+        # ==========================================
+        # 統一使用「狀態機」進行判定與統計
+        # ==========================================
         plan_count = 0
         done_count = 0
-        
-        if 'IMO' in vdf.columns:
-            vdf_dated = vdf.copy()
-            vdf_dated["日期"] = pd.to_datetime(vdf_dated["日期"], errors="coerce")
-            
-            vdf_window = vdf_dated.dropna(subset=["日期"])
-            vdf_window = vdf_window[
-                ~vdf_window["IMO"].isin(["-", "", "(本次無資料)"])
-            ]
-            
-            # 如果 PLAN 仍然只想看近五天，保留
-            vdf_window = vdf_window[vdf_window["日期"] >= cutoff]
-            
-            for imo, group in vdf_window.groupby("IMO"):
-                last_app = None
-                last_done = None
-                last_cancel = None
-                
-                app = group[group["狀態"].str.contains("APPROVED", case=False, na=False)]
-                if not app.empty:
-                    last_app = app["日期"].max()
-                    
-                done = group[group["狀態"].str.contains("COMPLETED", case=False, na=False)]
-                if not done.empty:
-                    last_done = done["日期"].max()
-                    
-                cancel = group[group["狀態"].str.contains("CANCEL", case=False, na=False)]
-                if not cancel.empty:
-                    last_cancel = cancel["日期"].max()
-                    
-                candidates = []
-                
-                if last_app is not None:
-                    candidates.append(("APPROVED", last_app))
-                    
-                if last_done is not None:
-                    candidates.append(("COMPLETED", last_done))
-                    
-                if last_cancel is not None:
-                    candidates.append(("CANCELLED", last_cancel))
-                    
-                if not candidates:
-                    continue
-                    
-                # 找出日期最新的一個狀態
-                latest_status = max(candidates, key=lambda x: x[1])[0]
-                
-                if latest_status == "APPROVED":
-                    plan_count += 1
-                elif latest_status == "COMPLETED":
-                    done_count += 1
-                # CANCELLED 不計
+        overdue_count = 0
+        ready_count = 0 
+        recent_orders = []
 
-        if not recent_active.empty:
-            recent_active = recent_active.sort_values("日期", ascending=False)
-            recent_active.loc[:, "temp_id"] = (
-            recent_active["IMO"]
-               .replace("-", None)
-               .fillna(recent_active.index.to_series())
-             )
-            deduped = recent_active.drop_duplicates(subset=['temp_id'], keep='first').copy()
-            deduped["_priority"] = deduped["狀態"].apply(
-                lambda s: 0 if "APPROVED" in str(s).upper() else 1
-            )
-            deduped = deduped.sort_values(["_priority", "日期"], ascending=[True, False])
-            recent_orders = deduped[["日期", "狀態", "船名"]].to_dict("records")
-        else:
-            recent_orders = []
+        if 'IMO' in vdf.columns:
+            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
+            
+            imo_states = {}
+            for imo, group in valid_imo_df.groupby('IMO'):
+                status_info = get_imo_current_status(group)
+                if status_info:
+                    imo_states[imo] = status_info
+
+            for imo, info in imo_states.items():
+                c_status = info["current_status"]
+                is_overdue = info["is_overdue"]
+                
+                if c_status == "PLAN":
+                    plan_count += 1
+                    ready_count += 1
+                    if is_overdue:
+                        overdue_count += 1
+                elif c_status == "DONE":
+                    done_count += 1
+
+                tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
+                cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
+                
+                # 顯示規則：所有未完成的 PLAN (含逾期) + 近五天內結案的單
+                if c_status == "PLAN" or info["last_date"] >= cutoff:
+                    display_status = "OVERDUE ⚠️" if is_overdue else c_status
+                    
+                    recent_orders.append({
+                        "狀態": display_status,
+                        "日期": info["last_date"],
+                        "船名": info["vessel_name"],
+                        "IMO": imo
+                    })
+
+            recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
 
         row = v.to_dict()
         row.update({
@@ -346,6 +335,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "ready_count": ready_count,
             "plan_count": plan_count,
             "done_count": done_count,
+            "overdue_count": overdue_count,  # 新增逾期數量，供未來地圖 UI 使用
             "completed_count": completed_count,
             "total_orders": len(vdf),
             "latest_subject": latest_subject,
@@ -353,8 +343,6 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "recent_orders": recent_orders,
         })
         summary_rows.append(row)
-        
-    return pd.DataFrame(summary_rows)
 
 
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
