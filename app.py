@@ -296,8 +296,34 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             ]
             ready_count = int(ready_df['IMO'].nunique())
 
+        # PLAN / DONE：近五天內（跟 ready_count 用同一個 5 天門檻）有效 IMO 的
+        # APPROVED + COMPLETED 總數當作「計畫量」，COMPLETED 的部分是「完成量」，
+        # 用來畫簡單進度條追蹤完成速度。注意這裡要用原始 vdf 重新篩選 5 天窗口，
+        # 不能沿用上面已經把「配對成功的 APPROVED+COMPLETED」拿掉的 active_vdf，
+        # 否則已配對完成的訂單會被排除，完成數會不準。
+        plan_count = 0
+        done_count = 0
+        if 'IMO' in vdf.columns:
+            vdf_dated = vdf.copy()
+            vdf_dated["日期"] = pd.to_datetime(vdf_dated["日期"], errors='coerce')
+            vdf_window = vdf_dated.dropna(subset=["日期"])
+            vdf_window = vdf_window[vdf_window["日期"] >= cutoff]
+            vdf_window = vdf_window[~vdf_window['IMO'].isin(['-', '', '(本次無資料)'])]
+            vdf_window = vdf_window[~vdf_window['IMO'].isin(cancelled_imos)]
+
+            relevant_mask = (
+                vdf_window['狀態'].str.contains('APPROVED', case=False, na=False) |
+                vdf_window['狀態'].str.contains('COMPLETED', case=False, na=False)
+            )
+            relevant = vdf_window[relevant_mask]
+            plan_count = int(relevant['IMO'].nunique())
+            done_count = int(
+                relevant.loc[relevant['狀態'].str.contains('COMPLETED', case=False, na=False), 'IMO'].nunique()
+            )
+
         # 近期清單：IMO 去重 (保留最新一筆)，APPROVED(APPD) 優先排在前面，
-        # 同優先序再依日期新到舊排序，最多取 10 筆
+        # 同優先序再依日期新到舊排序。不再限制筆數，展開時全部帶出來，
+        # 前端超過 10 筆會用捲軸而不是把 popup 撐得很長。
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
             # 建立臨時 ID 以保護 '-' 的 IMO 不被整批過濾
@@ -311,7 +337,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                 lambda s: 0 if "APPROVED" in str(s).upper() else 1
             )
             deduped = deduped.sort_values(["_priority", "日期"], ascending=[True, False])
-            recent_orders = deduped.head(10)[["日期", "狀態", "船名"]].to_dict("records")
+            recent_orders = deduped[["日期", "狀態", "船名"]].to_dict("records")
         else:
             recent_orders = []
 
@@ -320,6 +346,8 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "matched": matched,
             "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
             "ready_count": ready_count,
+            "plan_count": plan_count,
+            "done_count": done_count,
             "completed_count": completed_count,
             "total_orders": len(vdf),
             "latest_subject": latest_subject,
@@ -538,7 +566,9 @@ def _status_emoji(status):
 
 
 def _build_recent_orders_html(recent_orders, vessel_name):
-    """組出 popup 裡「未結案訂單」的 HTML：利用 onclick 切換顯示，最多帶入 10 筆"""
+    """組出 popup 裡「未結案訂單」的 HTML：預設顯示前 3 筆，
+    展開後把全部資料帶出來（不限制筆數），超過 10 筆時額外清單改用
+    可捲動區塊（拉桿拖曳），避免 popup 視窗被撐得太長。"""
     if not recent_orders:
         return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
 
@@ -555,21 +585,24 @@ def _build_recent_orders_html(recent_orders, vessel_name):
         )
 
     items = [_item(o) for o in recent_orders]
-    html = '<div style="margin-top:4px;">' + "".join(items[:3])
+    total = len(items)
+    html_out = '<div style="margin-top:4px;">' + "".join(items[:3])
 
-    if len(items) > 3:
+    if total > 3:
         rest_html = "".join(items[3:])
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
-        
-        html += (
-            f'<div id="extra_{safe_id}" style="display:none;">{rest_html}</div>'
+        # 超過 10 筆才需要捲軸；3~10 筆展開後直接顯示即可，不用額外限高
+        scroll_style = " max-height:220px; overflow-y:auto;" if total > 10 else ""
+
+        html_out += (
+            f'<div id="extra_{safe_id}" style="display:none;{scroll_style}">{rest_html}</div>'
             f'<div id="btn_{safe_id}" style="cursor:pointer; color:#1a73e8; font-size:11px; margin-top:4px; text-align:center;" '
             f'onclick="document.getElementById(\'extra_{safe_id}\').style.display=\'block\'; this.style.display=\'none\';">'
-            f'▼ 顯示更多近五天訂單（共 {len(recent_orders)} 筆）</div>'
+            f'▼ 顯示更多近五天訂單（共 {total} 筆）</div>'
         )
 
-    html += "</div>"
-    return html
+    html_out += "</div>"
+    return html_out
 
 
 def _format_coord(lat, lon):
@@ -579,15 +612,25 @@ def _format_coord(lat, lon):
     return f"{abs(lat):.4f}°{lat_dir}, {abs(lon):.4f}°{lon_dir}"
 
 
-def _build_copy_text(v, ready_count, coord_str, last_signal_str):
+def _progress_bar(done, plan, width=8):
+    """用方塊字元組一個簡單進度條，追蹤近五天 DONE/PLAN 的完成速度"""
+    if plan <= 0:
+        return "░" * width
+    ratio = max(0.0, min(1.0, done / plan))
+    filled = round(ratio * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
     """組出「複製船舶資訊」按鈕要複製的純文字內容"""
+    status_emoji_only = str(v.get('status', '')).split(' ')[0]
     lines = [
-        f"🚢 {v['油輪']}",
+        f"{status_emoji_only} {v['油輪']}",
         f"狀態：{v['status']}",
         f"POS：{coord_str}",
         f"HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn",
         f"LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）",
-        f"已安排加油：{ready_count} ・ 已完成：{v.get('completed_count', 0)}",
+        f"PLAN：{plan_count} ｜ DONE：{done_count} {_progress_bar(done_count, plan_count)}",
     ]
     recent_orders = v.get("recent_orders", []) or []
     if recent_orders:
@@ -647,6 +690,8 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         # 📍 視覺標籤設定：沒有訂單 > 高負載(>=10) > 停船中(低速) > 正常航行
         # ==========================================
         ready_count = v.get('ready_count', 0)
+        plan_count = v.get('plan_count', 0)
+        done_count = v.get('done_count', 0)
         label_color = _tooltip_style(v)
         tooltip_html = f"<div style='color:{label_color};'><i class='fa fa-ship'></i> {v['油輪']}</div>"
 
@@ -655,7 +700,7 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
         icon_hex = _MARKER_HEX.get(v["status"], "#1e88e5")
 
         coord_str = _format_coord(v["lat"], v["lon"])
-        copy_text = _build_copy_text(v, ready_count, coord_str, last_signal_str)
+        copy_text = _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str)
         copy_text_attr = html.escape(copy_text, quote=True)
 
         copy_btn_html = (
@@ -683,17 +728,21 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
             '">📋 複製船舶資訊</button>'
         )
 
-        # Popup 詳細內容（除了狀態保留 icon，其餘欄位改用精簡標籤；座標用南北東西表示）
+        status_emoji_only = str(v.get('status', '')).split(' ')[0]
+        progress_bar_str = _progress_bar(done_count, plan_count)
+
+        # Popup 詳細內容：標題行合併狀態顏色 emoji，其餘欄位一律用精簡標籤；
+        # 座標用南北東西表示；用 PLAN/DONE 進度條取代原本的已安排加油/已完成文字
         popup_html = f"""
         <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
-            <b style="font-size:14px;">🚢 {v['油輪']}</b><br>
-            狀態：{v['status']}<br>
+            <b style="font-size:14px;">{status_emoji_only} {v['油輪']}</b><br>
             POS：{coord_str}<br>
             HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn<br>
             LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）<br>
             <hr style="margin:6px 0;">
-            ✅ 已安排加油 <b>{ready_count}</b> ・
-            🏁 已完成 <b>{v.get('completed_count', 0)}</b>
+            <div style="font-family:'Consolas','Courier New',monospace; font-size:12px; letter-spacing:1px;">
+                PLAN：{plan_count} ｜ DONE：{done_count} {progress_bar_str}
+            </div>
             {recent_orders_html}
             {match_line}
             {copy_btn_html}
