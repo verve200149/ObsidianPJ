@@ -141,6 +141,14 @@ def get_imo_current_status(imo_group_df):
             return {"current_status": "CANCEL(X)", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
     
     # 情況：之後什麼都沒有 -> 仍在進行中 (PLAN)
+    # 🌟 手動關閉機制：如果這封信的 status 被人工從 pending 改成 clear，
+    # 代表業務上已經確認這筆訂單結束了（只是系統一直等不到 COMPLETED 通知），
+    # 直接視為 DONE(CLEAR)。注意這只影響「原本會判定成 PLAN」的情況——
+    # 前面已經有 CANCEL(X) / DONE 的分支都已經 return 掉了，不會被這裡覆蓋。
+    manual_status = str(latest_app.get('手動狀態', 'pending')).strip().lower()
+    if manual_status == 'clear':
+        return {"current_status": "DONE(CLEAR)", "last_date": app_time, "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
+
     is_overdue = (pd.Timestamp.now(tz=app_time.tzinfo if hasattr(app_time, 'tzinfo') else None) - app_time).days > 14
     return {"current_status": "PLAN", "last_date": app_time, "is_overdue": is_overdue, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
@@ -250,7 +258,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
                     plan_count += 1
                     ready_count += 1
                     if is_overdue: overdue_count += 1
-                elif c_status == "DONE":
+                elif c_status.startswith("DONE"):
                     done_count += 1
 
                 # 準備近期訂單列表
@@ -701,6 +709,7 @@ def load_all_data():
                         "IMO": s['imo'],
                         "呼號": s_info.get('callSign', "-"),
                         "主旨": fm.get('subject', '-'),
+                        "手動狀態": str(fm.get('status', 'pending')).strip().lower(),
                         "原始內文": body
                     })
             except Exception as e:
@@ -895,14 +904,21 @@ if not df.empty and "IMO" in df.columns:
             if pd.notnull(first_reschedule): cands.append(("RESCHEDULE", first_reschedule))
             
             if not cands:
-                # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 證明這單還在 PLAN，
-                # 接著計算是否超過 14 天逾期
-                tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
-                now = pd.Timestamp.now(tz=tz_info)
-                if (now - t).days > 14:
-                    final_statuses.append("OVERDUE")
+                # 找不到未來的結案紀錄，也沒有被更新的預報取代 -> 原本會判定成 PLAN。
+                # 🌟 手動關閉機制：先檢查這封信的 status 有沒有被人工從 pending
+                # 改成 clear——如果有，代表業務上已經確認結束了（等不到 COMPLETED
+                # 通知的情況），直接判定 DONE(CLEAR)，不用再算逾期。
+                manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
+                if manual_status == 'clear':
+                    final_statuses.append("DONE(CLEAR)")
                 else:
-                    final_statuses.append("PLAN")
+                    # 接著計算是否超過 14 天逾期
+                    tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
+                    now = pd.Timestamp.now(tz=tz_info)
+                    if (now - t).days > 14:
+                        final_statuses.append("OVERDUE")
+                    else:
+                        final_statuses.append("PLAN")
             else:
                 # 找到的候選事件裡，取「最早發生」的那一個當作這筆紀錄的真正結局
                 # （例如：3天後被重新預報 vs 5天後才完成 -> 應該算 RESCHEDULE，不是 DONE）
@@ -1039,6 +1055,7 @@ if not df.empty:
             val_upper = str(val).upper().strip()
             if "OVERDUE" in val_upper: return "background-color: #ffcdd2; color: #b71c1c; font-weight: bold;"
             elif "RESCHEDULE" in val_upper: return "background-color: rgba(120, 170, 230, 0.35); color: #1a4d8f; font-weight: bold;"
+            elif "DONE(CLEAR)" in val_upper: return "background-color: rgba(0, 150, 136, 0.30); color: #00695c; font-weight: bold;"
             elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(250, 225, 50, 0.3);"
             elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(255, 128, 128, 0.3);"
             elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(230, 120, 230, 0.3);"
