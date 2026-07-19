@@ -1004,7 +1004,7 @@ if not df.empty:
     # 處理關鍵字搜尋遮罩 (支援多字串搜尋與找不到提示)
     search_keywords = []
     if search_kw:
-       search_cols = ["油輪", "狀態", "船名", "IMO", "呼號", "主旨", "原始內文"]
+        search_cols = ["油輪", "狀態", "船名", "IMO", "呼號", "主旨", "原始內文"]
         # 以空格拆分多個關鍵字
         search_keywords = [k.strip() for k in search_kw.split() if k.strip()]
         
