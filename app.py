@@ -1116,16 +1116,20 @@ if not df.empty:
 
         def style_status(val):
             val_upper = str(val).upper().strip()
-            # 0.5 透明度
-            if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: #ffffff; font-weight: bold;"
-            elif "EXTEND" in val_upper: return "background-color: rgba(21, 101, 192, 0.5); color: #ffffff; font-weight: bold;"
-            elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: #ffffff; font-weight: bold;"
-            # 0.8 透明度
+            
+            # 0.5 透明度背景 + 0.6 透明度字體
+            if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "EXTEND" in val_upper: return "background-color: rgba(21, 101, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            
+            # PLAN 保持 0.8 背景 + 實心純白字體 (最顯眼)
             elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(251, 140, 0, 0.8); color: #ffffff; font-weight: bold;"
-            # 0.5 透明度
-            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: #ffffff; font-weight: bold;"
-            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: #ffffff; font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: #ffffff; font-weight: bold;"
+            
+            # 0.5 透明度背景 + 0.6 透明度字體
+            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            
             return ""
 
         valid_dup_indices = _compute_duplicate_pair_indices(display_df)
