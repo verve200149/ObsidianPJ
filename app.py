@@ -109,13 +109,11 @@ def _parse_custom_date(s):
     try: return datetime(y, mo, d, h, mi, tzinfo=TAIPEI_TZ)
     except ValueError: return None
 
-
 def _parse_position(raw):
     parts = str(raw or "").split(',')
     if len(parts) < 2: return None
     try: return {"lat": float(parts[0].strip()), "lon": float(parts[1].strip())}
     except ValueError: return None
-
 
 def _parse_speed_field(raw):
     s = str(raw or "").strip()
@@ -124,7 +122,6 @@ def _parse_speed_field(raw):
     digits = re.sub(r'[^\d.]', '', s)
     speed = float(digits) if digits else 0.0
     return {"speed": speed, "heading": heading}
-
 
 def _find_column(columns, candidates):
     normalized = {str(c).strip().lower(): c for c in columns}
@@ -135,7 +132,63 @@ def _find_column(columns, candidates):
             if cand in col_lower: return col_orig
     return None
 
+# ==========================================
+# ⚙️ 核心狀態機：計算單一 IMO 的最終商業狀態
+# ==========================================
+def get_imo_current_status(imo_group_df):
+    """
+    傳入單一 IMO 的所有歷史信件 (DataFrame)，
+    回傳該 IMO 最終的 Current Status 與相關資訊。
+    """
+    # 確保有日期且依時間排序 (最新在最上面)
+    valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期", ascending=False)
+    if valid_df.empty:
+        return None
 
+    # 尋找各原始狀態的最新發生時間
+    last_app = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]["日期"].max()
+    last_done = valid_df[valid_df["狀態"].str.contains("COMPLETED", case=False, na=False)]["日期"].max()
+    last_cancel = valid_df[valid_df["狀態"].str.contains("CANCEL", case=False, na=False)]["日期"].max()
+
+    candidates = []
+    if pd.notnull(last_app): candidates.append(("PLAN", last_app))
+    if pd.notnull(last_done): candidates.append(("DONE", last_done))
+    if pd.notnull(last_cancel): candidates.append(("CANCELLED", last_cancel))
+
+    latest_row = valid_df.iloc[0] # 最新的一封信
+
+    # 處理如果完全沒有這三種主力狀態時 (例如全是 PENDING 或 KYC 未通過)
+    if not candidates:
+        raw_status = str(latest_row["狀態"]).upper()
+        return {
+            "current_status": "PENDING" if "PENDING" in raw_status else raw_status,
+            "last_date": latest_row["日期"],
+            "is_overdue": False,
+            "vessel_name": latest_row["船名"],
+            "subject": latest_row["主旨"]
+        }
+
+    # 取出發生時間最晚的那個，作為最終商業狀態
+    latest_status, latest_date = max(candidates, key=lambda x: x[1])
+
+    # 🚨 逾期邏輯 (Overdue)：如果是 PLAN 狀態，且超過 14 天未結案
+    is_overdue = False
+    if latest_status == "PLAN":
+        now = pd.Timestamp.now(tz=latest_date.tzinfo)
+        if (now - latest_date).days > 14:
+            is_overdue = True
+
+    return {
+        "current_status": latest_status,
+        "last_date": latest_date,
+        "is_overdue": is_overdue,
+        "vessel_name": latest_row["船名"],
+        "subject": latest_row["主旨"]
+    }
+
+# ==========================================
+# 📊 建立船舶與訂單摘要資料
+# ==========================================
 @st.cache_data(ttl=60, show_spinner=False)
 def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
     if vessel_pos_df.empty: return vessel_pos_df
@@ -215,7 +268,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "ready_count": ready_count,
             "plan_count": plan_count,
             "done_count": done_count,
-            "overdue_count": overdue_count,
+            "overdue_count": overdue_count,  # 新增逾期數量，供未來地圖 UI 使用
             "completed_count": completed_count,
             "total_orders": len(vdf),
             "latest_subject": latest_subject,
@@ -225,149 +278,7 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
         summary_rows.append(row)
         
     return pd.DataFrame(summary_rows)
-
-# ==========================================
-# ⚙️ 核心狀態機：計算單一 IMO 的最終商業狀態
-# ==========================================
-def get_imo_current_status(imo_group_df):
-    """
-    傳入單一 IMO 的所有歷史信件 (DataFrame)，
-    回傳該 IMO 最終的 Current Status 與相關資訊。
-    """
-    # 確保有日期且依時間排序 (最新在最上面)
-    valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期", ascending=False)
-    if valid_df.empty:
-        return None
-
-    # 尋找各原始狀態的最新發生時間
-    last_app = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]["日期"].max()
-    last_done = valid_df[valid_df["狀態"].str.contains("COMPLETED", case=False, na=False)]["日期"].max()
-    last_cancel = valid_df[valid_df["狀態"].str.contains("CANCEL", case=False, na=False)]["日期"].max()
-
-    candidates = []
-    if pd.notnull(last_app): candidates.append(("PLAN", last_app))
-    if pd.notnull(last_done): candidates.append(("DONE", last_done))
-    if pd.notnull(last_cancel): candidates.append(("CANCELLED", last_cancel))
-
-    latest_row = valid_df.iloc[0] # 最新的一封信
-
-    # 處理如果完全沒有這三種主力狀態時 (例如全是 PENDING 或 KYC 未通過)
-    if not candidates:
-        raw_status = str(latest_row["狀態"]).upper()
-        return {
-            "current_status": "PENDING" if "PENDING" in raw_status else raw_status,
-            "last_date": latest_row["日期"],
-            "is_overdue": False,
-            "vessel_name": latest_row["船名"],
-            "subject": latest_row["主旨"]
-        }
-
-    # 取出發生時間最晚的那個，作為最終商業狀態
-    latest_status, latest_date = max(candidates, key=lambda x: x[1])
-
-    # 🚨 逾期邏輯 (Overdue)：如果是 PLAN 狀態，且超過 14 天未結案
-    is_overdue = False
-    if latest_status == "PLAN":
-        now = pd.Timestamp.now(tz=latest_date.tzinfo)
-        if (now - latest_date).days > 14:
-            is_overdue = True
-
-    return {
-        "current_status": latest_status,
-        "last_date": latest_date,
-        "is_overdue": is_overdue,
-        "vessel_name": latest_row["船名"],
-        "subject": latest_row["主旨"]
-    }
-
-@st.cache_data(ttl=60, show_spinner=False)
-def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
-    if vessel_pos_df.empty: return vessel_pos_df
-
-    df = df.copy()
-    df["_key"] = df["油輪"].astype(str).str.strip().str.lower()
-    grouped = dict(tuple(df.groupby("_key")))
-    empty_df = df.iloc[0:0] 
-
-    summary_rows = []
     
-    for _, v in vessel_pos_df.iterrows():
-        email_local = str(v.get("email_local", "")).strip().lower()
-        if email_local:
-            vdf = grouped.get(email_local, empty_df)
-        else:
-            vdf = df[df["油輪"] == v["油輪"]]
-
-        matched = not vdf.empty
-        completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
-        
-        latest = vdf.sort_values("日期", ascending=False).head(1)
-        latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
-       latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
-
-        # ==========================================
-        # 統一使用「狀態機」進行判定與統計
-        # ==========================================
-        plan_count = 0
-        done_count = 0
-        overdue_count = 0
-        ready_count = 0 
-        recent_orders = []
-
-        if 'IMO' in vdf.columns:
-            valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-            
-            imo_states = {}
-            for imo, group in valid_imo_df.groupby('IMO'):
-                status_info = get_imo_current_status(group)
-                if status_info:
-                    imo_states[imo] = status_info
-
-            for imo, info in imo_states.items():
-                c_status = info["current_status"]
-                is_overdue = info["is_overdue"]
-                
-                if c_status == "PLAN":
-                    plan_count += 1
-                    ready_count += 1
-                    if is_overdue:
-                        overdue_count += 1
-                elif c_status == "DONE":
-                    done_count += 1
-
-                tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
-                cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
-                
-                # 顯示規則：所有未完成的 PLAN (含逾期) + 近五天內結案的單
-                if c_status == "PLAN" or info["last_date"] >= cutoff:
-                    display_status = "OVERDUE ⚠️" if is_overdue else c_status
-                    
-                    recent_orders.append({
-                        "狀態": display_status,
-                        "日期": info["last_date"],
-                        "船名": info["vessel_name"],
-                        "IMO": imo
-                    })
-
-            recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
-
-        row = v.to_dict()
-        row.update({
-            "matched": matched,
-            "matched_油輪": vdf["油輪"].iloc[0] if matched else None,
-            "ready_count": ready_count,
-            "plan_count": plan_count,
-            "done_count": done_count,
-            "overdue_count": overdue_count,  # 新增逾期數量，供未來地圖 UI 使用
-            "completed_count": completed_count,
-            "total_orders": len(vdf),
-            "latest_subject": latest_subject,
-            "latest_date": latest_date,
-            "recent_orders": recent_orders,
-        })
-        summary_rows.append(row)
-
-
 _MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
 _MARKER_HEX = {"🔴 No Signal": "#e53935", "🟡 Weak": "#fb8c00", "🟢 Normal": "#2e7d32"}
 
