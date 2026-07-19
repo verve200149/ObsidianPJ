@@ -1001,13 +1001,33 @@ if not df.empty:
         end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
         mask &= (df["日期"] >= start_dt) & (df["日期"] <= end_dt)
 
-    # 處理關鍵字搜尋遮罩
+    # 處理關鍵字搜尋遮罩 (支援多字串搜尋與找不到提示)
+    search_keywords = []
     if search_kw:
-        search_cols = ["油輪", "狀態", "船名", "IMO", "呼號", "主旨", "原始內文"]
-        kw_mask = df[search_cols].astype(str).apply(
-            lambda col: col.str.contains(search_kw, case=False, na=False)
-        ).any(axis=1)
-        mask &= kw_mask
+       search_cols = ["油輪", "狀態", "船名", "IMO", "呼號", "主旨", "原始內文"]
+        # 以空格拆分多個關鍵字
+        search_keywords = [k.strip() for k in search_kw.split() if k.strip()]
+        
+        missing_keywords = []
+        combined_kw_mask = pd.Series([False] * len(df))
+        
+        for kw in search_keywords:
+            kw_mask = df[search_cols].astype(str).apply(
+                lambda col: col.str.contains(kw, case=False, na=False, regex=False)
+            ).any(axis=1)
+            
+            if not kw_mask.any():
+                missing_keywords.append(kw)
+            else:
+                combined_kw_mask |= kw_mask
+                
+        if missing_keywords:
+            st.warning(f"⚠️ 提示：以下字串不在表格中： **{', '.join(missing_keywords)}**", icon="🚨")
+            
+        if combined_kw_mask.any():
+            mask &= combined_kw_mask
+        elif missing_keywords:
+            mask &= False  # 若所有關鍵字都找不到，清空表格顯示
 
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
@@ -1076,10 +1096,13 @@ if not df.empty:
         def style_duplicate_imo(s):
             return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
 
-        # 關鍵字搜尋反白效果 
+        # 關鍵字搜尋反白效果 (支援多組字串反白)
         def style_search_match(val):
-            if search_kw and search_kw.lower() in str(val).lower():
-                return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
+            if search_kw and search_keywords:
+                val_str = str(val).lower()
+                for kw in search_keywords:
+                    if kw.lower() in val_str:
+                        return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
             return ""
             
         styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["狀態"])
