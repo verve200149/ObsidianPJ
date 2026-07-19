@@ -113,10 +113,24 @@ def get_imo_current_status(imo_group_df):
     # 找出所有終結事件 (COMPLETED 或 CANCEL)
     terminators = valid_df[valid_df["狀態"].str.contains("COMPLETED|CANCEL", case=False, regex=True)]
 
+    # 🛠️ 修正 1：如果沒有 APPROVED，也要正確判斷當前信件是不是已經結案
     if apps.empty:
         latest = valid_df.iloc[-1]
-        return {"current_status": "PENDING", "last_date": latest["日期"], "is_overdue": False, "vessel_name": latest["船名"], "subject": latest["主旨"]}
-
+        raw_status = str(latest["狀態"]).upper()
+        
+        if "COMPLETED" in raw_status:
+            c_status = "DONE"
+        elif "CANCEL" in raw_status or "KYC" in raw_status:
+            c_status = "CANCEL"
+        else:
+            manual_status = str(latest.get('手動狀態', 'pending')).strip().lower()
+            if manual_status == 'clear':
+                c_status = "WELL"
+            else:
+                c_status = "PENDING"
+                
+        return {"current_status": c_status, "last_date": latest["日期"], "is_overdue": False, "vessel_name": latest["船名"], "subject": latest["主旨"]}
+    
     # 取「最後一筆」預報作為當前焦點
     latest_app = apps.iloc[-1]
     app_time = latest_app["日期"]
