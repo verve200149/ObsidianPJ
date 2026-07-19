@@ -270,23 +270,58 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
         plan_count = 0
         done_count = 0
+        
         if 'IMO' in vdf.columns:
             vdf_dated = vdf.copy()
-            vdf_dated["日期"] = pd.to_datetime(vdf_dated["日期"], errors='coerce')
+            vdf_dated["日期"] = pd.to_datetime(vdf_dated["日期"], errors="coerce")
+            
             vdf_window = vdf_dated.dropna(subset=["日期"])
+            vdf_window = vdf_window[
+                ~vdf_window["IMO"].isin(["-", "", "(本次無資料)"])
+            ]
+            
+            # 如果 PLAN 仍然只想看近五天，保留
             vdf_window = vdf_window[vdf_window["日期"] >= cutoff]
-            vdf_window = vdf_window[~vdf_window['IMO'].isin(['-', '', '(本次無資料)'])]
-            vdf_window = vdf_window[~vdf_window['IMO'].isin(cancelled_imos)]
-
-            relevant_mask = (
-                vdf_window['狀態'].str.contains('APPROVED', case=False, na=False) |
-                vdf_window['狀態'].str.contains('COMPLETED', case=False, na=False)
-            )
-            relevant = vdf_window[relevant_mask]
-            plan_count = int(relevant['IMO'].nunique())
-            done_count = int(
-                relevant.loc[relevant['狀態'].str.contains('COMPLETED', case=False, na=False), 'IMO'].nunique()
-            )
+            
+            for imo, group in vdf_window.groupby("IMO"):
+                last_app = None
+                last_done = None
+                last_cancel = None
+                
+                app = group[group["狀態"].str.contains("APPROVED", case=False, na=False)]
+                if not app.empty:
+                    last_app = app["日期"].max()
+                    
+                done = group[group["狀態"].str.contains("COMPLETED", case=False, na=False)]
+                if not done.empty:
+                    last_done = done["日期"].max()
+                    
+                cancel = group[group["狀態"].str.contains("CANCEL", case=False, na=False)]
+                if not cancel.empty:
+                    last_cancel = cancel["日期"].max()
+                    
+                candidates = []
+                
+                if last_app is not None:
+                    candidates.append(("APPROVED", last_app))
+                    
+                if last_done is not None:
+                    candidates.append(("COMPLETED", last_done))
+                    
+                if last_cancel is not None:
+                    candidates.append(("CANCELLED", last_cancel))
+                    
+                if not candidates:
+                    continue
+                    
+                # 找出日期最新的一個狀態
+                latest_status = max(candidates, key=lambda x: x[1])[0]
+                
+                if latest_status == "APPROVED":
+                    plan_count += 1
+                elif latest_status == "COMPLETED":
+                    done_count += 1
+                # CANCELLED 不計
 
         if not recent_active.empty:
             recent_active = recent_active.sort_values("日期", ascending=False)
