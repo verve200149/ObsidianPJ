@@ -393,6 +393,7 @@ MAJOR_PORTS = [
     {"name": "Marshall Is.", "lat": 7.09, "lon": 171.38},
     {"name": "Rabaul", "lat": -4.20, "lon": 152.18},
     {"name": "Papeete", "lat": -17.53, "lon": -149.57},
+    {"name": "Tarawa", "lat": 1.53, "lon": 173.57},
 ]
 
 
