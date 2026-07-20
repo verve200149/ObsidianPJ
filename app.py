@@ -99,37 +99,68 @@ def _progress_bar(done, plan, width=8):
 # ==========================================
 def get_imo_current_status(imo_group_df):
     """
-    分析每一張 APPROVED 訂單的最終結局：
-    1. 後續接 COMPLETED -> DONE
-    2. 後續接新的 APPROVED（重複預報）-> EXTEND
-    3. 後續接 CANCEL 郵件 -> CANCEL
+    狀態機邏輯 (依時間軸由舊到新重播)：
+      APPROVED
+        │
+        ├── APPROVED (Extend) -> 維持 PLAN
+        │
+        ├── COMPLETED         -> 結案 (DONE)
+        │
+        ├── CANCELLED         -> 註銷 (CANCEL)
+        │
+        └── status="clear"    -> 手動結案 (DONE-C)
     """
     valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期")
     if valid_df.empty: return None
 
-    # 找出所有預報 (APPROVED)
-    apps = valid_df[valid_df["狀態"].str.contains("APPROVED", case=False, na=False)]
-    
-    # 找出所有終結事件 (COMPLETED 或 CANCEL)
-    terminators = valid_df[valid_df["狀態"].str.contains("COMPLETED|CANCEL", case=False, regex=True)]
+    current_state = "PENDING"
+    last_event = None
 
-    # 🛠️ 修正 1：如果沒有 APPROVED，也要正確判斷當前信件是不是已經結案
-    if apps.empty:
-        latest = valid_df.iloc[-1]
-        raw_status = str(latest["狀態"]).upper()
+    # 🕒 依時間順序重播這組 IMO 的所有事件
+    for _, row in valid_df.iterrows():
+        raw_status = str(row["狀態"]).upper()
         
-        if "COMPLETED" in raw_status:
-            c_status = "DONE"
+        if "APPROVED" in raw_status:
+            # ├── APPROVED (無論是初次或 Extend，都將游標指回 PLAN)
+            current_state = "PLAN"
+            
+        elif "COMPLETED" in raw_status:
+            # ├── COMPLETED -> DONE
+            current_state = "DONE"
+            
         elif "CANCEL" in raw_status or "KYC" in raw_status:
-            c_status = "CANCEL"
-        else:
-            manual_status = str(latest.get('手動狀態', 'pending')).strip().lower()
-            if manual_status == 'clear':
-                c_status = "DONE-C"  # 🌟 改為 DONE-C
-            else:
-                c_status = "PENDING"
-                
-        return {"current_status": c_status, "last_date": latest["日期"], "is_overdue": False, "vessel_name": latest["船名"], "subject": latest["主旨"]}
+            # ├── CANCELLED -> 直接關閉，不列入 PLAN
+            current_state = "CANCEL"
+            
+        last_event = row
+        
+    if last_event is None:
+        return None
+
+    # └── status="clear" 找目前還沒關閉的 APPROVED
+    if current_state == "PLAN":
+        # 為了避免漏抓，我們檢查這組 IMO 中最新的手動狀態是否為 clear
+        manual_status = str(last_event.get('手動狀態', 'pending')).strip().lower()
+        
+        if manual_status == 'clear':
+            # 找到了！還沒關閉的 APPROVED 且被標註 clear -> 轉為 DONE-C
+            current_state = "DONE-C"
+
+    # ⚠️ 判斷是否 Overdue (只有真正的 PLAN 才需要算逾期，DONE-C 不算)
+    is_overdue = False
+    if current_state == "PLAN":
+        app_time = last_event["日期"]
+        if pd.notna(app_time):
+            tz_info = app_time.tzinfo if hasattr(app_time, 'tzinfo') else None
+            is_overdue = (pd.Timestamp.now(tz=tz_info) - app_time).days > 14
+
+    return {
+        "current_status": current_state, 
+        "last_date": last_event["日期"], 
+        "is_overdue": is_overdue, 
+        "vessel_name": last_event["船名"], 
+        "subject": last_event["主旨"]
+    }
     
     # 取「最後一筆」預報作為當前焦點
     latest_app = apps.iloc[-1]
