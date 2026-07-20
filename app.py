@@ -964,10 +964,12 @@ df, parse_errors = load_all_data()
 if not df.empty and "IMO" in df.columns:
     final_statuses = []
     
-    # 預先 Group 提升效能
-    grouped_df = df.groupby('IMO')
+    # 🌟 修正點 1：改為使用「油輪」和「IMO」同時作為分組鍵 (Composite Key)
+    # 這樣不同油輪即使遇到相同的 IMO，時間線也會被切開獨立計算
+    grouped_df = df.groupby(['油輪', 'IMO'])
     
     for idx, row in df.iterrows():
+        tanker = row.get("油輪")  # 🌟 取得當前行對應的油輪
         imo = row.get("IMO")
         raw_status = str(row.get('狀態', '-')).upper()
         
@@ -994,7 +996,12 @@ if not df.empty and "IMO" in df.columns:
                 final_statuses.append("PLAN")
                 continue
                 
-            imo_group = grouped_df.get_group(imo)
+            # 🌟 修正點 2：提取時使用 (tanker, imo) 雙重條件來抓取這艘油輪專屬的時間線
+            try:
+                imo_group = grouped_df.get_group((tanker, imo))
+            except KeyError:
+                imo_group = pd.DataFrame(columns=df.columns)
+                
             future_events = imo_group[imo_group['日期'] >= t]
             
             comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
