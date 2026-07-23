@@ -239,14 +239,14 @@ if df.empty:
     else:
         st.info("目前 `data_CN/` 資料夾內沒有可解析的資料。")
 else:
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 3])
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 3, 1])
     with ctrl_col1:
         valid_dates = df["日期"].dropna()
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date), label_visibility="collapsed")
 
-    with ctrl_col3:
+    with ctrl_col2:
         search_kw = st.text_input(
             "🔍 關鍵字搜尋",
             placeholder="搜尋寄件者、主旨、數量、IMO、聯繫方式...（可用空白分隔多個關鍵字）",
@@ -294,13 +294,16 @@ else:
     
 
       # 2. 此時的 display_df 已經跟前端顯示的排序一模一樣，再傳給 Excel 產生器
-    with ctrl_col2:
-        st.download_button(
-            f"🗂️ 匯出 {len(display_df)} 筆",
-            build_cn_excel(display_df),
-            "cn_orders.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    # 🚀 匯出按鈕移到最右邊，並包在展開區塊裡，需要先手動展開才看得到下載按鈕，避免誤觸
+    with ctrl_col3:
+        with st.expander("🗂️ 匯出", expanded=False):
+            st.download_button(
+                f"匯出 {len(display_df)} 筆",
+                build_cn_excel(display_df),
+                "cn_orders.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
     # 3. 隱藏用不到的底層資料（後續交給 Streamlit 渲染表格）
     show_df = display_df.drop(columns=["原始內文", "_uid"], errors="ignore")
