@@ -178,6 +178,7 @@ def load_cn_data():
                         "寄件者": sender_clean,
                         "主旨": fm.get("subject", "-") or "-",
                         "數量": fm.get("quantity", "-") or "-",
+                        "處理": "",  # 暫時留空，供後續人工填寫處理狀態
                         "IMO": imo_num,
                         "聯繫方式": contact_val,
                         "放行狀態": fm.get("release_status", "-") or "-",
@@ -244,18 +245,50 @@ else:
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date), label_visibility="collapsed")
-    
+
+    with ctrl_col3:
+        search_kw = st.text_input(
+            "🔍 關鍵字搜尋",
+            placeholder="搜尋寄件者、主旨、數量、IMO、聯繫方式...（可用空白分隔多個關鍵字）",
+            key="main_search_input",
+            label_visibility="collapsed",
+        )
+
     # ★ 改用 df.index 作為 Series 的 index，徹底根絕長度/對齊不一致的問題
     mask = pd.Series(True, index=df.index)
     if isinstance(sel_range, tuple) and len(sel_range) == 2:
         start_dt = pd.to_datetime(sel_range[0])
         end_dt = pd.to_datetime(sel_range[1]).replace(hour=23, minute=59, second=59)
         mask &= (df["日期"] >= start_dt) & (df["日期"] <= end_dt)
+
+    # 🔍 多值空白搜尋：以空白分隔多個關鍵字，符合任一關鍵字的資料列都會被納入
+    search_keywords = []
+    if search_kw:
+        search_cols = ["寄件者", "主旨", "數量", "IMO", "聯繫方式", "放行狀態", "呼號", "原始內文"]
+        search_cols = [c for c in search_cols if c in df.columns]
+        search_keywords = [k.strip() for k in search_kw.split() if k.strip()]
+        missing_keywords = []
+        combined_kw_mask = pd.Series(False, index=df.index)
+
+        for kw in search_keywords:
+            kw_mask = df[search_cols].astype(str).apply(lambda col: col.str.contains(kw, case=False, na=False, regex=False)).any(axis=1)
+            if not kw_mask.any():
+                missing_keywords.append(kw)
+            else:
+                combined_kw_mask |= kw_mask
+
+        if missing_keywords:
+            st.warning(f"⚠️ 提示：以下字串不在表格中： **{', '.join(missing_keywords)}**", icon="🚨")
+        if combined_kw_mask.any():
+            mask &= combined_kw_mask
+        elif missing_keywords:
+            mask &= False
+
     # 1. 篩選與排序
     display_df = df[mask].sort_values(by="日期", ascending=False).reset_index(drop=True)
 
     # 🚀 修改點：將調整欄位順序的邏輯移到匯出按鈕「之前」
-    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "聯繫方式", "IMO", "呼號", "_uid", "原始內文"]
+    col_order = ["放行狀態", "日期", "寄件者", "主旨", "數量", "處理", "聯繫方式", "IMO", "呼號", "_uid", "原始內文"]
     display_df = display_df[[c for c in col_order if c in display_df.columns]]
 
     
@@ -271,8 +304,23 @@ else:
 
     # 3. 隱藏用不到的底層資料（後續交給 Streamlit 渲染表格）
     show_df = display_df.drop(columns=["原始內文", "_uid"], errors="ignore")
-    styler_method = getattr(show_df.style, "map", getattr(show_df.style, "applymap", None))
-    styled_df = styler_method(style_alerts, subset=["呼號"]) if styler_method else show_df
+
+    def style_search_match(val):
+        if search_kw and search_keywords:
+            val_str = str(val).lower()
+            for kw in search_keywords:
+                if kw.lower() in val_str:
+                    return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
+        return ""
+
+    styler_method_name = "map" if hasattr(show_df.style, "map") else ("applymap" if hasattr(show_df.style, "applymap") else None)
+
+    if styler_method_name:
+        styled_df = getattr(show_df.style, styler_method_name)(style_alerts, subset=["呼號"])
+        if search_kw:
+            styled_df = getattr(styled_df, styler_method_name)(style_search_match)
+    else:
+        styled_df = show_df
 
     # 動態產生 table_key，每次刪除後 counter + 1，確保表格徹底刷新並清空選取狀態
     table_key = f"order_dataframe_{st.session_state['df_key_counter']}"
@@ -292,6 +340,7 @@ else:
             "日期": st.column_config.DatetimeColumn("接收時間", format="MM/DD HH:mm"),
             "主旨": st.column_config.TextColumn("主旨", width="medium"),
             "數量": st.column_config.TextColumn("數量", width="small"),
+            "處理": st.column_config.TextColumn("處理", width="small"),
             "IMO": st.column_config.TextColumn("IMO", width="small"),
             "聯繫方式": st.column_config.TextColumn("聯繫方式", width="medium"),
             "放行狀態": st.column_config.TextColumn("放行狀態", width="small"),
