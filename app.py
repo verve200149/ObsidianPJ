@@ -760,6 +760,32 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
 
     return st_folium(m, height=460, use_container_width=True, key="fleet_map", returned_objects=["last_object_clicked_tooltip"])
 
+
+@st.fragment
+def render_map_section(vessel_summary_df: pd.DataFrame):
+    """
+    🌟 地圖獨立成 fragment：
+    - 平常拖曳/縮放地圖，只有這個 fragment 會重跑，外層篩選器、表格完全不受影響。
+    - 只有真的點到船 marker（clicked_vessel 變動）時，才故意呼叫「不帶 scope」的
+      st.rerun()，觸發整頁重跑，讓外層篩選器 + 表格連動跳到該船的訂單。
+    """
+    map_state = render_fleet_map(vessel_summary_df)
+    clicked_vessel = None
+    if map_state and map_state.get("last_object_clicked_tooltip"):
+        clicked_html = map_state["last_object_clicked_tooltip"]
+        clicked_vessel = re.sub(r'<[^>]*>', '', clicked_html).strip()
+
+    if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
+        st.session_state["_last_clicked_vessel"] = clicked_vessel
+        match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
+        if not match_row.empty and match_row["matched"].iloc[0]:
+            st.session_state["selected_tanker"] = match_row["matched_油輪"].iloc[0]
+        else:
+            st.session_state["selected_tanker"] = "全部"
+            st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件")
+        # 不加 scope，故意觸發整頁重跑，讓外層篩選器 + 表格連動更新
+        st.rerun()
+
 # ==========================================
 # 📂 檔案讀寫與資料載入
 # ==========================================
@@ -959,6 +985,129 @@ def apply_split_layout(marker_id: str, n_selected: int):
     """
     components.html(js, height=0, width=0)
 
+
+def render_email_pane(container, row):
+    time_str = row['日期'].strftime('%Y-%m-%d %H:%M') if pd.notnull(row['日期']) else '未知時間'
+    with container:
+        st.markdown(f'''
+        <div class="email-pane">
+            <div class="email-header">
+                <div class="email-subject">{row['主旨']}</div>
+                <div class="email-meta">🚢 <b>{row['油輪']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['狀態']}</div>
+            </div>
+            <div class="email-body">{row["原始內文"]}</div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+
+@st.fragment
+def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywords: list):
+    """
+    🌟 表格獨立成 fragment：
+    勾選列、下載、關閉預覽…等表格內部互動，只重跑這個 fragment，
+    上面的地圖不會被連帶重繪（不會跳動、不會重置視角）。
+    """
+    if "df_key_counter" not in st.session_state: st.session_state.df_key_counter = 0
+    DF_KEY = f"email_table_{st.session_state.df_key_counter}"
+    if "sel_seq" not in st.session_state: st.session_state.sel_seq = {}
+    if "sel_counter" not in st.session_state: st.session_state.sel_counter = 0
+
+    _hint_rows = st.session_state.get(DF_KEY, {}).get("selection", {}).get("rows", [])
+    guess_has_selection = len(st.session_state.sel_seq) > 0 or len(_hint_rows) > 0
+
+    if not guess_has_selection:
+        marker_id = None
+        col_list = st.container()
+        preview_cols = []
+    else:
+        marker_id = "split-marker"
+        st.markdown(f'<div id="{marker_id}"></div>', unsafe_allow_html=True)
+        col_list, col_preview1, col_preview2 = st.columns([1, 1, 1], gap="small")
+        preview_cols = [col_preview1, col_preview2]
+
+    with col_list:
+        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "處理", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
+
+        def style_status(val):
+            val_upper = str(val).upper().strip()
+
+            # 0.5 透明度背景 + 0.6 透明度字體
+            if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "EXTEND" in val_upper: return "background-color: rgba(92, 107, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+
+            # PLAN 保持 0.8 背景 + 實心純白字體 (最顯眼)
+            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(251, 140, 0, 0.8); color: #ffffff; font-weight: bold;"
+
+            # 0.5 透明度背景 + 0.6 透明度字體
+            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+            elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
+
+            return ""
+
+        valid_dup_indices = _compute_duplicate_pair_indices(display_df)
+        def style_duplicate_imo(s): return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
+
+        def style_search_match(val):
+            if search_kw and search_keywords:
+                val_str = str(val).lower()
+                for kw in search_keywords:
+                    if kw.lower() in val_str: return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
+            return ""
+
+        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["處理"]).apply(style_duplicate_imo, subset=["IMO"])
+        if search_kw: styled_df = styled_df.map(style_search_match)
+
+        event = st.dataframe(
+            styled_df, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row",
+            key=DF_KEY, height=500, column_config={
+                "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"),
+                "狀態": st.column_config.TextColumn("單信狀態", width="small"),
+                "處理": st.column_config.TextColumn("處理", width="small"),
+                "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
+            }
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        exp_c1, exp_c2, exp_c3 = st.columns([1, 1, 1])
+        with exp_c1: st.download_button(f"📊 匯出目前篩選 ({len(display_df)} 筆)", display_df.to_csv(index=False).encode('utf-8-sig'), "ship_report.csv", "text/csv")
+        with exp_c2: st.download_button(f"🗂️ 匯出全部資料", build_tanker_excel(display_df), "ship_report_by_tanker.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with exp_c3:
+            if guess_has_selection:
+                if st.button("❌ 關閉預覽 (清除選取)", use_container_width=True):
+                    st.session_state.sel_seq = {}
+                    st.session_state.df_key_counter += 1
+                    st.rerun(scope="fragment")
+
+    raw_rows = event.get("selection", {}).get("rows", [])
+    raw_set = set(raw_rows)
+    for r in list(st.session_state.sel_seq.keys()):
+        if r not in raw_set: del st.session_state.sel_seq[r]
+    for r in raw_rows:
+        if r not in st.session_state.sel_seq:
+            st.session_state.sel_counter += 1
+            st.session_state.sel_seq[r] = st.session_state.sel_counter
+
+    all_checked = sorted(st.session_state.sel_seq.keys(), key=lambda r: st.session_state.sel_seq[r])
+    preview_order = all_checked[-2:] if len(all_checked) > 2 else all_checked
+    n_selected = len(preview_order)
+
+    if len(all_checked) > 2:
+        st.warning("⚠️ 目前勾選了多筆，僅預覽最後選取的 2 筆。若要讓表格勾選狀態也只剩 2 筆，請手動取消較舊的勾選。")
+
+    if marker_id: apply_split_layout(marker_id, n_selected)
+
+    for i, row_idx in enumerate(preview_order):
+        if i < len(preview_cols) and row_idx < len(display_df):
+            render_email_pane(preview_cols[i], display_df.iloc[row_idx])
+
+    # 🌟 這裡改用 scope="fragment"：只是為了讓 split layout 的欄數（0/1/2欄）
+    # 即時跟上勾選狀態變化，屬於表格內部的排版修正，不應該波及地圖。
+    if (n_selected == 0) != (not guess_has_selection):
+        st.rerun(scope="fragment")
+
+
 # ==========================================
 # 🚀 主程式邏輯與 UI 渲染
 # ==========================================
@@ -1143,127 +1292,6 @@ if not df.empty:
     display_df = df[mask].sort_values(by=["日期", "主旨"], ascending=[False, False]).reset_index(drop=True)
 
     with st.expander("🗺️ 船隊即時位置地圖", expanded=True):
-        map_state = render_fleet_map(vessel_summary_df)
-        clicked_vessel = None
-        if map_state and map_state.get("last_object_clicked_tooltip"):
-            clicked_html = map_state["last_object_clicked_tooltip"]
-            clicked_vessel = re.sub(r'<[^>]*>', '', clicked_html).strip()
-        if clicked_vessel and clicked_vessel != st.session_state.get("_last_clicked_vessel"):
-            st.session_state["_last_clicked_vessel"] = clicked_vessel
-            match_row = vessel_summary_df[vessel_summary_df["油輪"] == clicked_vessel]
-            if not match_row.empty and match_row["matched"].iloc[0]: st.session_state["selected_tanker"] = match_row["matched_油輪"].iloc[0]
-            else:
-                st.session_state["selected_tanker"] = "全部"
-                st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件")
-            st.rerun()
+        render_map_section(vessel_summary_df)
 
-    if "df_key_counter" not in st.session_state: st.session_state.df_key_counter = 0
-    DF_KEY = f"email_table_{st.session_state.df_key_counter}"
-    if "sel_seq" not in st.session_state: st.session_state.sel_seq = {}   
-    if "sel_counter" not in st.session_state: st.session_state.sel_counter = 0
-
-    _hint_rows = st.session_state.get(DF_KEY, {}).get("selection", {}).get("rows", [])
-    guess_has_selection = len(st.session_state.sel_seq) > 0 or len(_hint_rows) > 0
-
-    if not guess_has_selection:
-        marker_id = None
-        col_list = st.container()
-        preview_cols = []
-    else:
-        marker_id = "split-marker"
-        st.markdown(f'<div id="{marker_id}"></div>', unsafe_allow_html=True)
-        col_list, col_preview1, col_preview2 = st.columns([1, 1, 1], gap="small")
-        preview_cols = [col_preview1, col_preview2]
-
-    with col_list:
-        DISPLAY_COLUMNS = ["油輪", "日期", "狀態", "處理", "船名", "IMO", "呼號", "ETA", "位置", "主旨"]
-
-        def style_status(val):
-            val_upper = str(val).upper().strip()
-            
-            # 0.5 透明度背景 + 0.6 透明度字體
-            if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            elif "EXTEND" in val_upper: return "background-color: rgba(92, 107, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            
-            # PLAN 保持 0.8 背景 + 實心純白字體 (最顯眼)
-            elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(251, 140, 0, 0.8); color: #ffffff; font-weight: bold;"
-            
-            # 0.5 透明度背景 + 0.6 透明度字體
-            elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-            
-            return ""
-
-        valid_dup_indices = _compute_duplicate_pair_indices(display_df)
-        def style_duplicate_imo(s): return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
-
-        def style_search_match(val):
-            if search_kw and search_keywords:
-                val_str = str(val).lower()
-                for kw in search_keywords:
-                    if kw.lower() in val_str: return "background-color: #ffeb3b; color: #000000; font-weight: bold;"
-            return ""
-            
-        styled_df = display_df[DISPLAY_COLUMNS].style.map(style_status, subset=["處理"]).apply(style_duplicate_imo, subset=["IMO"])
-        if search_kw: styled_df = styled_df.map(style_search_match)
-        
-        event = st.dataframe(
-            styled_df, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row",
-            key=DF_KEY, height=500, column_config={
-                "日期": st.column_config.DatetimeColumn("收信時間", format="MM/DD HH:mm"), 
-                "狀態": st.column_config.TextColumn("單信狀態", width="small"),
-                "處理": st.column_config.TextColumn("處理", width="small"),
-                "主旨": st.column_config.TextColumn("郵件主旨", width="medium")
-            }
-        )
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        exp_c1, exp_c2, exp_c3 = st.columns([1, 1, 1])
-        with exp_c1: st.download_button(f"📊 匯出目前篩選 ({len(display_df)} 筆)", display_df.to_csv(index=False).encode('utf-8-sig'), "ship_report.csv", "text/csv")
-        with exp_c2: st.download_button(f"🗂️ 匯出全部資料", build_tanker_excel(df), "ship_report_by_tanker.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        with exp_c3:
-            if guess_has_selection:
-                if st.button("❌ 關閉預覽 (清除選取)", use_container_width=True):
-                    st.session_state.sel_seq = {}
-                    st.session_state.df_key_counter += 1
-                    st.rerun()
-
-    raw_rows = event.get("selection", {}).get("rows", [])
-    raw_set = set(raw_rows)
-    for r in list(st.session_state.sel_seq.keys()):
-        if r not in raw_set: del st.session_state.sel_seq[r]
-    for r in raw_rows:
-        if r not in st.session_state.sel_seq:
-            st.session_state.sel_counter += 1
-            st.session_state.sel_seq[r] = st.session_state.sel_counter
-
-    all_checked = sorted(st.session_state.sel_seq.keys(), key=lambda r: st.session_state.sel_seq[r])
-    preview_order = all_checked[-2:] if len(all_checked) > 2 else all_checked
-    n_selected = len(preview_order)
-
-    if len(all_checked) > 2:
-        st.warning("⚠️ 目前勾選了多筆，僅預覽最後選取的 2 筆。若要讓表格勾選狀態也只剩 2 筆，請手動取消較舊的勾選。")
-
-    if marker_id: apply_split_layout(marker_id, n_selected)
-
-    def render_email_pane(container, row):
-        time_str = row['日期'].strftime('%Y-%m-%d %H:%M') if pd.notnull(row['日期']) else '未知時間'
-        with container:
-            st.markdown(f'''
-            <div class="email-pane">
-                <div class="email-header">
-                    <div class="email-subject">{row['主旨']}</div>
-                    <div class="email-meta">🚢 <b>{row['油輪']}</b> &nbsp; | &nbsp; 📅 {time_str} &nbsp; | &nbsp; 📂 {row['狀態']}</div>
-                </div>
-                <div class="email-body">{row["原始內文"]}</div>
-            </div>
-            ''', unsafe_allow_html=True)
-
-    for i, row_idx in enumerate(preview_order):
-        if i < len(preview_cols) and row_idx < len(display_df):
-            render_email_pane(preview_cols[i], display_df.iloc[row_idx])
-
-    if (n_selected == 0) != (not guess_has_selection):
-        st.rerun()
+    render_table_section(display_df, search_kw, search_keywords)
