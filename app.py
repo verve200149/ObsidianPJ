@@ -1,17 +1,15 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import os, yaml, json, re, io, html
+import os, yaml, json, re, io, html, hashlib
 from datetime import datetime, timezone, timedelta
 
 import folium
 from folium.plugins import MarkerCluster
-from folium.elements import MacroElement
-from jinja2 import Template
 from streamlit_folium import st_folium
 
 # ==========================================
-# 🛡️ 維護建議與基本設定
+# 🛡️ 基本設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="船隊調度管理系統", page_icon="🚢")
 
@@ -32,9 +30,6 @@ st.markdown("""
     div[data-testid="stElementContainer"] { margin-bottom: 0.3rem; }
     </style>
     """, unsafe_allow_html=True)
-# 註：原本這裡有一段 .leaflet-tooltip 的 CSS，但 st_folium 是把地圖渲染在獨立 iframe 裡，
-# 外層頁面的 CSS 進不去 iframe 內部，完全沒有作用。真正生效的版本現在寫在
-# render_fleet_map() 裡面，透過 m.get_root().header.add_child() 直接注入地圖自己的 <head>。
 
 # ==========================================
 # 🗺️ 常數與工具函式
@@ -43,7 +38,15 @@ ARROW_HEADING = {'→': 90, '↗': 45, '↑': 0, '↖': 315, '←': 270, '↙': 
 SIGNAL_LIMIT_HOURS = 6
 TAIPEI_TZ = timezone(timedelta(hours=8))
 VMS_SPREADSHEET_ID = "1wwFluz-H4-r7HRKya1AUZ_2KyZ6bVow_2v-TBqXj46c"
-VMS_VESSELDATA_GID = "1420495034"  
+VMS_VESSELDATA_GID = "1420495034"
+
+# st.download_button 的 data 可傳 callable（點下載才執行）需要 Streamlit >= 1.46
+try:
+    _ST_VER = tuple(int(x) for x in re.findall(r'\d+', st.__version__)[:2])
+except Exception:
+    _ST_VER = (0, 0)
+_ST_SUPPORTS_LAZY_DOWNLOAD = _ST_VER >= (1, 46)
+
 
 def _parse_custom_date(s):
     m = re.match(r'^(\d{4})(\d{2})(\d{2}) (\d{2}):(\d{2})$', str(s or "").strip())
@@ -75,14 +78,6 @@ def _find_column(columns, candidates):
             if cand in col_lower: return col_orig
     return None
 
-def _status_emoji(status):
-    s = str(status).upper()
-    if "APPROVED" in s: return "✅"
-    if "COMPLETED" in s: return "🏁"
-    if "KYC" in s or "CANCEL" in s: return "🚫"
-    if "PENDING" in s: return "📋"
-    return "•"
-
 def _format_coord(lat, lon):
     lat_dir = "N" if lat >= 0 else "S"
     lon_dir = "E" if lon >= 0 else "W"
@@ -100,17 +95,11 @@ def _progress_bar(done, plan, width=8):
 def get_imo_current_status(imo_group_df):
     """
     狀態機邏輯 (依時間軸由舊到新重播)：
-      APPROVED
-        │
-        ├── APPROVED (Extend) -> 維持 PLAN
-        │
-        ├── COMPLETED         -> 結案 (DONE)
-        │
-        ├── CANCELLED         -> 註銷 (CANCEL)
-        │
-        ├── status="close"    -> 手動直接結案 (DONE)
-        │
-        └── status="clear"    -> 手動結案 (DONE-C)
+      APPROVED (含 Extend) -> PLAN
+      COMPLETED            -> DONE
+      CANCELLED / KYC      -> CANCEL
+      status="close"       -> DONE
+      status="clear"       -> DONE-C (僅作用在仍為 PLAN 的最後事件)
     """
     valid_df = imo_group_df.dropna(subset=["日期"]).sort_values("日期")
     if valid_df.empty: return None
@@ -118,42 +107,29 @@ def get_imo_current_status(imo_group_df):
     current_state = "PENDING"
     last_event = None
 
-    # 🕒 依時間順序重播這組 IMO 的所有事件
     for _, row in valid_df.iterrows():
         raw_status = str(row["狀態"]).upper()
         manual_status_row = str(row.get('手動狀態', 'pending')).strip().lower()
 
         if manual_status_row == 'close':
-            # ├── 手動標記 status: close -> 該筆事件涉及的這個 target 直接視為結案 (DONE)
             current_state = "DONE"
-
         elif "APPROVED" in raw_status:
-            # ├── APPROVED (無論是初次或 Extend，都將游標指回 PLAN)
             current_state = "PLAN"
-            
         elif "COMPLETED" in raw_status:
-            # ├── COMPLETED -> DONE
             current_state = "DONE"
-            
         elif "CANCEL" in raw_status or "KYC" in raw_status:
-            # ├── CANCELLED -> 直接關閉，不列入 PLAN
             current_state = "CANCEL"
-            
+
         last_event = row
-        
+
     if last_event is None:
         return None
 
-    # └── status="clear" 找目前還沒關閉的 APPROVED
     if current_state == "PLAN":
-        # 為了避免漏抓，我們檢查這組 IMO 中最新的手動狀態是否為 clear
         manual_status = str(last_event.get('手動狀態', 'pending')).strip().lower()
-        
         if manual_status == 'clear':
-            # 找到了！還沒關閉的 APPROVED 且被標註 clear -> 轉為 DONE-C
             current_state = "DONE-C"
 
-    # ⚠️ 判斷是否 Overdue (只有真正的 PLAN 才需要算逾期，DONE-C 不算)
     is_overdue = False
     if current_state == "PLAN":
         app_time = last_event["日期"]
@@ -162,41 +138,12 @@ def get_imo_current_status(imo_group_df):
             is_overdue = (pd.Timestamp.now(tz=tz_info) - app_time).days > 14
 
     return {
-        "current_status": current_state, 
-        "last_date": last_event["日期"], 
-        "is_overdue": is_overdue, 
-        "vessel_name": last_event["船名"], 
+        "current_status": current_state,
+        "last_date": last_event["日期"],
+        "is_overdue": is_overdue,
+        "vessel_name": last_event["船名"],
         "subject": last_event["主旨"]
     }
-    
-    # 取「最後一筆」預報作為當前焦點
-    latest_app = apps.iloc[-1]
-    app_time = latest_app["日期"]
-    
-    # 在這筆預報之後，發生了什麼事？
-    future_apps = apps[apps["日期"] > app_time]
-    future_terms = terminators[terminators["日期"] > app_time]
-    
-    if not future_apps.empty:
-        return {"current_status": "CANCEL", "last_date": future_apps.iloc[0]["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
-
-    if not future_terms.empty:
-        first_term = future_terms.sort_values("日期").iloc[0]
-        term_status = str(first_term["狀態"]).upper()
-        
-        if "COMPLETED" in term_status:
-            return {"current_status": "DONE", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
-        else:
-            return {"current_status": "CANCEL", "last_date": first_term["日期"], "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
-    
-    # 🌟 來到這裡代表未來「什麼事都沒發生」！
-    # 這時候才啟動手動關閉機制
-    manual_status = str(latest_app.get('手動狀態', 'pending')).strip().lower()
-    if manual_status == 'clear':
-        return {"current_status": "DONE-C", "last_date": app_time, "is_overdue": False, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
-        
-    is_overdue = (pd.Timestamp.now(tz=app_time.tzinfo if hasattr(app_time, 'tzinfo') else None) - app_time).days > 14
-    return {"current_status": "PLAN", "last_date": app_time, "is_overdue": is_overdue, "vessel_name": latest_app["船名"], "subject": latest_app["主旨"]}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_vessel_positions():
@@ -252,18 +199,36 @@ def load_vessel_positions():
         })
     return pd.DataFrame(rows)
 
-@st.cache_data(ttl=60, show_spinner=False)
-def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.DataFrame:
-    if vessel_pos_df.empty: return vessel_pos_df
+def _df_signature(df: pd.DataFrame):
+    """輕量簽章：取代對整個 DataFrame（含超長原始內文）做 hash。"""
+    if df is None or df.empty: return (0,)
+    return (
+        len(df),
+        str(df["日期"].max()),
+        hash(tuple(df["狀態"].astype(str))),
+        hash(tuple(df["手動狀態"].astype(str))),
+    )
 
-    df = df.copy()
+def _pos_signature(pos_df: pd.DataFrame):
+    if pos_df is None or pos_df.empty: return (0,)
+    return (
+        len(pos_df),
+        hash(tuple(zip(pos_df["油輪"], pos_df["last_signal"].astype(str), pos_df["lat"].astype(str), pos_df["lon"].astype(str)))),
+    )
+
+@st.cache_data(ttl=60, show_spinner=False)
+def build_vessel_summary(_df: pd.DataFrame, _vessel_pos_df: pd.DataFrame, df_sig, pos_sig) -> pd.DataFrame:
+    # 參數前綴 _ 代表 Streamlit 不 hash 它，改由 df_sig / pos_sig 判斷是否需要重算
+    if _vessel_pos_df.empty: return _vessel_pos_df
+
+    df = _df.copy()
     df["_key"] = df["油輪"].astype(str).str.strip().str.lower()
     grouped = dict(tuple(df.groupby("_key")))
-    empty_df = df.iloc[0:0] 
+    empty_df = df.iloc[0:0]
 
     summary_rows = []
-    
-    for _, v in vessel_pos_df.iterrows():
+
+    for _, v in _vessel_pos_df.iterrows():
         email_local = str(v.get("email_local", "")).strip().lower()
         if email_local:
             vdf = grouped.get(email_local, empty_df)
@@ -272,24 +237,20 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
         matched = not vdf.empty
         completed_count = int(vdf["狀態"].str.contains("COMPLETED", case=False, na=False).sum())
-        
+
         latest = vdf.sort_values("日期", ascending=False).head(1)
         latest_subject = latest["主旨"].values[0] if not latest.empty else "-"
         latest_date = latest["日期"].values[0] if not latest.empty else pd.NaT
 
-        # ==========================================
-        # 統計邏輯 (已刪除舊的配對邏輯，使用新的狀態機)
-        # ==========================================
         plan_count = 0
         done_count = 0
         overdue_count = 0
-        ready_count = 0 
+        ready_count = 0
         recent_orders = []
 
         if 'IMO' in vdf.columns:
             valid_imo_df = vdf[~vdf['IMO'].isin(['-', '', '(本次無資料)'])]
-            
-            # 使用狀態機進行統計
+
             imo_states = {}
             for imo, group in valid_imo_df.groupby('IMO'):
                 status_info = get_imo_current_status(group)
@@ -299,20 +260,18 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             for imo, info in imo_states.items():
                 c_status = info["current_status"]
                 is_overdue = info["is_overdue"]
-                
+
                 if c_status == "PLAN":
                     plan_count += 1
                     ready_count += 1
                     if is_overdue: overdue_count += 1
-                elif c_status.startswith("DONE"):  # 🌟 這裡會自動把 DONE 跟 DONE-C 都算進去
+                elif c_status.startswith("DONE"):
                     done_count += 1
 
-                # 準備近期訂單列表：
-                # - 未完成 (PLAN/OVERDUE，也就是 APPD) 不管日期多舊，一律都要列出來
-                # - 已結案 (CMP/CANCEL/DONE-C) 只列近 5 天內的，避免清單被歷史紀錄灌爆
+                # 未完成 (PLAN/OVERDUE) 一律列出；已結案只列近 5 天
                 tz_info = info["last_date"].tzinfo if hasattr(info["last_date"], 'tzinfo') else None
                 cutoff = pd.Timestamp.now(tz=tz_info) - pd.Timedelta(days=5)
-                
+
                 if c_status == "PLAN" or info["last_date"] >= cutoff:
                     display_status = "OVERDUE ⚠️" if is_overdue else c_status
                     recent_orders.append({
@@ -324,13 +283,11 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
 
             def _status_priority(status_text):
                 s = str(status_text).upper()
-                if "OVERDUE" in s or "PLAN" in s: return 0   # APPD：未完成，優先顯示
-                if "DONE" in s or "DONE-C" in s: return 1       # CMP：已完成
-                return 2                                       # CANCEL（或其他）：優先權最低
+                if "OVERDUE" in s or "PLAN" in s: return 0
+                if "DONE" in s: return 1
+                return 2
 
-            # 用兩次「穩定排序」達成「先照優先序分組，組內再依日期新到舊」：
-            # 先整批依日期新到舊排好，再依優先序分組——因為 Python 的 sort 是
-            # 穩定排序，同優先序內原本的日期順序不會被打亂。
+            # 兩次穩定排序：先依日期新到舊，再依優先序分組
             recent_orders = sorted(recent_orders, key=lambda x: x["日期"], reverse=True)
             recent_orders = sorted(recent_orders, key=lambda x: _status_priority(x["狀態"]))
 
@@ -349,36 +306,105 @@ def build_vessel_summary(df: pd.DataFrame, vessel_pos_df: pd.DataFrame) -> pd.Da
             "recent_orders": recent_orders,
         })
         summary_rows.append(row)
-        
+
     return pd.DataFrame(summary_rows)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def compute_process_status(_df: pd.DataFrame, df_sig) -> list:
+    """為整個表格計算每一列的「處理」狀態（原本主程式的 iterrows 迴圈，現在有 cache）。"""
+    final_statuses = []
+    grouped_df = _df.groupby(['油輪', 'IMO'])
+    now_cache = {}
+
+    for idx, row in _df.iterrows():
+        tanker = row.get("油輪")
+        imo = row.get("IMO")
+        raw_status = str(row.get('狀態', '-')).upper()
+        manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
+
+        # 手動 close：最高優先權，直接結案
+        if manual_status == 'close':
+            final_statuses.append("DONE")
+            continue
+
+        # 無效 IMO
+        if pd.isna(imo) or imo in ['-', '', '(本次無資料)']:
+            if "COMPLETED" in raw_status: final_statuses.append("DONE")
+            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL")
+            elif "APPROVED" in raw_status: final_statuses.append("PLAN")
+            else: final_statuses.append(raw_status)
+            continue
+
+        if "COMPLETED" in raw_status:
+            final_statuses.append("DONE")
+            continue
+        if "CANCEL" in raw_status or "KYC" in raw_status:
+            final_statuses.append("CANCEL")
+            continue
+
+        # APPROVED：往未來找結案 / 取消 / 重新排程
+        if "APPROVED" in raw_status or "PLAN" in raw_status:
+            t = row['日期']
+            if pd.isna(t):
+                final_statuses.append("PLAN")
+                continue
+
+            try:
+                imo_group = grouped_df.get_group((tanker, imo))
+            except KeyError:
+                imo_group = pd.DataFrame(columns=_df.columns)
+
+            future_events = imo_group[imo_group['日期'] >= t]
+
+            comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
+            canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
+            reschedule_ev = future_events[
+                (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
+                & (future_events['日期'] > t)
+            ]
+
+            first_comp = comp_ev['日期'].min() if not comp_ev.empty else pd.NaT
+            first_canc = canc_ev['日期'].min() if not canc_ev.empty else pd.NaT
+            first_reschedule = reschedule_ev['日期'].min() if not reschedule_ev.empty else pd.NaT
+
+            cands = []
+            if pd.notnull(first_comp): cands.append(("DONE", first_comp))
+            if pd.notnull(first_canc): cands.append(("CANCEL", first_canc))
+            if pd.notnull(first_reschedule): cands.append(("EXTEND", first_reschedule))
+
+            if not cands:
+                if manual_status == 'clear':
+                    final_statuses.append("DONE-C")
+                else:
+                    tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
+                    if tz_info not in now_cache:
+                        now_cache[tz_info] = pd.Timestamp.now(tz=tz_info)
+                    if (now_cache[tz_info] - t).days > 14:
+                        final_statuses.append("OVERDUE")
+                    else:
+                        final_statuses.append("PLAN")
+            else:
+                final_statuses.append(min(cands, key=lambda x: x[1])[0])
+            continue
+
+        final_statuses.append(raw_status)
+
+    return final_statuses
 
 # ==========================================
 # 🗺️ 地圖渲染相關
 # ==========================================
-_MARKER_COLOR = {"🔴 No Signal": "red", "🟡 Weak": "orange", "🟢 Normal": "green"}
-_MARKER_HEX = {"🔴 No Signal": "#e53935", "🟡 Weak": "#fb8c00", "🟢 Normal": "#2e7d32"}
-
-# 沒有配對到任何訂單的船，icon 維持灰色（跟航速色階獨立，優先權最高）
+# 沒有配對到任何訂單的船，icon 維持灰色（優先於航速色階）
 _NO_ORDER_COLOR = "#9e9e9e"
 
 def _icon_color_by_speed(matched, speed):
-    """
-    船形 icon 顏色：
-    - 沒有配對到訂單 -> 灰色（維持既有規則，優先於航速判斷）
-    - 有訂單時依航速分四段上色，對應原本 GAS 腳本的 speedToColor 漸層：
-      0~2kn / 2~6kn / 6~10kn / 10kn 以上
-    """
     if not matched:
         return _NO_ORDER_COLOR
     speed = speed or 0
-    if speed < 2:
-        return "#90CAF9"
-    elif speed < 6:
-        return "#42A5F5"
-    elif speed < 10:
-        return "#1E88E5"
-    else:
-        return "#0D47A1"
+    if speed < 2: return "#90CAF9"
+    elif speed < 6: return "#42A5F5"
+    elif speed < 10: return "#1E88E5"
+    else: return "#0D47A1"
 
 # 主要港口／島國參考點
 MAJOR_PORTS = [
@@ -403,163 +429,17 @@ MAJOR_PORTS = [
     {"name": "Tarawa", "lat": 1.53, "lon": 173.57},
 ]
 
-
-class EdgeTickOverlay(MacroElement):
-    """
-    在地圖容器的四個邊緣顯示動態經緯度刻度，跟著 moveend / zoomend
-    即時重新計算像素位置，效果類似固定在畫面邊框的座標軸。
-    純內嵌 JS，不依賴任何外部 CDN。
-    """
-    def __init__(self):
-        super().__init__()
-        self._template = Template("""
-        {% macro script(this, kwargs) %}
-        (function() {
-            var map = {{ this._parent.get_name() }};
-            var container = map.getContainer();
-
-            var overlay = document.createElement('div');
-            overlay.style.position = 'absolute';
-            overlay.style.top = '0';
-            overlay.style.left = '0';
-            overlay.style.width = '100%';
-            overlay.style.height = '100%';
-            overlay.style.pointerEvents = 'none';
-            overlay.style.zIndex = '650';
-            container.appendChild(overlay);
-
-            var NICE_STEPS = [1, 2, 5, 10, 15, 30, 45, 60, 90];
-            function niceStep(span, targetCount) {
-                var raw = span / targetCount;
-                for (var i = 0; i < NICE_STEPS.length; i++) {
-                    if (NICE_STEPS[i] >= raw) return NICE_STEPS[i];
-                }
-                return 90;
-            }
-
-            function fmtLon(lon) {
-                var l = ((lon % 360) + 540) % 360 - 180;
-                l = Math.round(l);
-                if (l === 0) return '0°';
-                if (Math.abs(l) === 180) return '180°';
-                return Math.abs(l) + (l > 0 ? '°E' : '°W');
-            }
-            function fmtLat(lat) {
-                lat = Math.round(lat);
-                if (lat === 0) return '0°';
-                return Math.abs(lat) + (lat > 0 ? '°N' : '°S');
-            }
-
-            function addLabel(text, x, y, transform) {
-                var el = document.createElement('div');
-                el.textContent = text;
-                el.style.position = 'absolute';
-                el.style.fontSize = '10px';
-                el.style.fontWeight = 'bold';
-                el.style.color = '#546e7a';
-                el.style.background = 'rgba(255,255,255,0.85)';
-                el.style.padding = '1px 3px';
-                el.style.borderRadius = '2px';
-                el.style.whiteSpace = 'nowrap';
-                el.style.left = x + 'px';
-                el.style.top = y + 'px';
-                el.style.transform = transform;
-                overlay.appendChild(el);
-            }
-
-            function redraw() {
-                overlay.innerHTML = '';
-                var size = map.getSize();
-                var bounds = map.getBounds();
-                var west = bounds.getWest();
-                var east = bounds.getEast();
-                var south = bounds.getSouth();
-                var north = bounds.getNorth();
-                var lonSpan = east - west;
-                var latSpan = north - south;
-                if (lonSpan <= 0 || latSpan <= 0) return;
-
-                var lonStep = niceStep(lonSpan, 6);
-                var latStep = niceStep(latSpan, 5);
-
-                var lonStart = Math.ceil(west / lonStep) * lonStep;
-                for (var lon = lonStart; lon <= east; lon += lonStep) {
-                    var ptTop = map.latLngToContainerPoint([north, lon]);
-                    var ptBottom = map.latLngToContainerPoint([south, lon]);
-                    addLabel(fmtLon(lon), ptTop.x, 4, 'translateX(-50%)');
-                    addLabel(fmtLon(lon), ptBottom.x, size.y - 16, 'translateX(-50%)');
-                }
-
-                var latStart = Math.ceil(south / latStep) * latStep;
-                for (var lat = latStart; lat <= north; lat += latStep) {
-                    var ptLeft = map.latLngToContainerPoint([lat, west]);
-                    var ptRight = map.latLngToContainerPoint([lat, east]);
-                    addLabel(fmtLat(lat), 4, ptLeft.y, 'translateY(-50%)');
-                    addLabel(fmtLat(lat), size.x - 4, ptRight.y, 'translate(-100%, -50%)');
-                }
-            }
-
-            map.on('moveend', redraw);
-            map.on('zoomend', redraw);
-            map.whenReady(redraw);
-            setTimeout(redraw, 200);
-        })();
-        {% endmacro %}
-        """)
-
-
-class TooltipClickOpensPopup(MacroElement):
-    """
-    讓永久顯示的船名標籤（tooltip）本身也可以點擊，直接開啟該船的 popup，
-    不用非得精準點到很小的三角形 icon 才有反應。
-
-    因為船隻標記是放在 MarkerCluster 裡，縮放/群聚時會動態進出 DOM，
-    所以綁定邏輯掛在幾個群組事件上、並搭配延遲重試，確保新出現的
-    tooltip 也會被補上點擊事件。
-    """
-    def __init__(self):
-        super().__init__()
-        self._template = Template("""
-        {% macro script(this, kwargs) %}
-        (function() {
-            var group = {{ this._parent.get_name() }};
-
-            function bindTooltipClicks() {
-                group.eachLayer(function(layer) {
-                    if (!layer.getTooltip) return;
-                    var tooltip = layer.getTooltip();
-                    if (!tooltip) return;
-                    var el = tooltip.getElement ? tooltip.getElement() : null;
-                    if (!el || el.dataset.clickBound === '1') return;
-                    el.dataset.clickBound = '1';
-                    el.style.pointerEvents = 'auto';
-                    el.style.cursor = 'pointer';
-                    el.addEventListener('click', function(ev) {
-                        ev.stopPropagation();
-                        layer.openPopup();
-                    });
-                });
-            }
-
-            group.on('layeradd', bindTooltipClicks);
-            group.on('spiderfied', bindTooltipClicks);
-            group.on('animationend', bindTooltipClicks);
-            setTimeout(bindTooltipClicks, 300);
-            setTimeout(bindTooltipClicks, 1000);
-            setTimeout(bindTooltipClicks, 2000);
-        })();
-        {% endmacro %}
-        """)
-
-
 def _add_major_ports(m):
+    """輕量版：只留 CircleMarker + tooltip，不再為每個港口多建一個文字 DivIcon。"""
     for p in MAJOR_PORTS:
-        map_lon = p["lon"] + 360 if p["lon"] < 0 else p["lon"]
-        folium.CircleMarker(location=[p["lat"], map_lon], radius=3, color="#78909c", weight=1, fill=True, fill_color="#cfd8dc", fill_opacity=0.9, tooltip=p["name"]).add_to(m)
-        folium.Marker(location=[p["lat"], map_lon], icon=folium.DivIcon(html=('<div style="font-size:9px; color:#78909c; font-weight:600; white-space:nowrap; transform:translate(6px,-4px); text-shadow:0 0 2px #fff, 0 0 2px #fff;">' + p["name"] + '</div>'), icon_size=(0, 0), icon_anchor=(0, 0))).add_to(m)
+        lon = p["lon"] + 360 if p["lon"] < 0 else p["lon"]
+        folium.CircleMarker(
+            location=[p["lat"], lon], radius=3, color="#78909c", weight=1,
+            fill=True, fill_color="#cfd8dc", fill_opacity=0.9, tooltip=p["name"],
+        ).add_to(m)
 
 def _ship_div_icon(color_hex, heading, size=34):
-    """船形 icon：三角箭頭造型，會依航向旋轉。size 可調整整體大小（原本 24，放大到 34）。"""
+    """船形 icon：三角箭頭造型，會依航向旋轉。"""
     half = size / 2
     svg = (
         f'<div style="width:{size}px; height:{size}px; transform:rotate({heading}deg); '
@@ -580,29 +460,28 @@ def _tooltip_style(v):
 
 def _build_recent_orders_html(recent_orders, vessel_name):
     if not recent_orders: return '<div style="color:#999; margin-top:2px;">近期無待辦或未結案訂單</div>'
-    
+
     def _item(o):
         status = str(o.get("狀態", "-")).upper()
-        # 轉換回原本的習慣縮寫與 Icon
         if "OVERDUE" in status: emoji, display = "⚠️", "OVERDUE"
-        elif "DONE-C" in status: emoji, display = "🏁", "DONE-C"  # 🌟 改為 DONE-C
+        elif "DONE-C" in status: emoji, display = "🏁", "DONE-C"
         elif "PLAN" in status or "APPROVED" in status: emoji, display = "✅", "APPD"
         elif "DONE" in status or "COMPLETED" in status: emoji, display = "🏁", "CMP"
         elif "CANCEL" in status: emoji, display = "🚫", "CANCEL"
         else: emoji, display = "📋", status
-        
+
         ship = o.get("船名", "-") or "-"
         imo = str(o.get("IMO", "")).strip()
-        
+
         dt = o.get("日期", pd.NaT)
         dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else ""
         dt_html = f"<span style='color:#888; font-size:11px;'>({dt_str})</span>" if dt_str else ""
-        
-        # 決定要帶入的關鍵字：優先使用 IMO，如果沒有或無效，則使用船名
+
+        # 優先帶入 IMO，沒有或無效則用船名
         copy_target = imo if imo and imo not in ["-", "(本次無資料)", "nan"] else ship
         safe_copy_target = copy_target.replace("'", "\\'")
-        
-        # 🌟 核心魔法：直接把關鍵字丟到上方的 Streamlit 搜尋框中，並自動加一格空白
+
+        # 點擊後把關鍵字丟進上方 Streamlit 搜尋框（找不到時退回複製到剪貼簿）
         js_script = (
             f"var val = '{safe_copy_target}'; "
             "var pDoc = window.parent.document; "
@@ -611,24 +490,23 @@ def _build_recent_orders_html(recent_orders, vessel_name):
             "for(var i=0; i<inputs.length; i++){ if(inputs[i].placeholder && inputs[i].placeholder.includes('搜尋')){ target=inputs[i]; break; } } "
             "if(target) { "
                 "var cur = target.value || ''; "
-                "if(cur.indexOf(val) === -1) { " # 避免連續點擊同一筆造成重複
+                "if(cur.indexOf(val) === -1) { "
                     "var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; "
                     "var space = (cur && !cur.endsWith(' ')) ? ' ' : ''; "
                     "setter.call(target, cur + space + val + ' '); "
                     "target.dispatchEvent(new Event('input', {bubbles: true})); "
                 "} "
-            "} else { navigator.clipboard.writeText(val + ' '); } " # 找不到搜尋框的備用方案(複製到剪貼簿)
+            "} else { navigator.clipboard.writeText(val + ' '); } "
             "var self = this; self.style.backgroundColor='#d2e3fc'; setTimeout(function(){self.style.backgroundColor='transparent';}, 400);"
         )
-        
+
         return f'<div style="padding:4px 2px; border-bottom:1px solid #f0f0f0; font-size:12px; cursor:pointer; transition: background-color 0.2s; border-radius:3px;" onclick="{js_script}" title="點擊帶入 IMO / 船名至搜尋框" onmouseover="this.style.backgroundColor=\'#f1f3f4\'" onmouseout="this.style.backgroundColor=\'transparent\'">{emoji} <b>{display}</b> {dt_html} ・ {ship}</div>'
-    
+
     items = [_item(o) for o in recent_orders]
     total = len(items)
-    
-    # 拿掉提示字眼，保留外層容器
+
     html_out = '<div style="margin-top:4px;">' + "".join(items[:3])
-    
+
     if total > 3:
         rest_html = "".join(items[3:])
         safe_id = re.sub(r'\W+', '_', str(vessel_name))
@@ -638,55 +516,98 @@ def _build_recent_orders_html(recent_orders, vessel_name):
     return html_out
 
 def _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str):
-    # 第一部分：船的基本資訊 (維持不變)
     lines = [
         f"{v['油輪']}",
         f"位置\t{coord_str}",
         f"航向/航速\t{v['heading']:.0f}° / {v['speed']:.1f}kn",
         f"最後訊號\t{last_signal_str}",
         "近期訂單：",
-        # 標題列：狀態-船名 \t IMO
-        "狀態-船名\tIMO" 
+        "狀態-船名\tIMO"
     ]
-    
-    # 第二部分：訂單明細
+
     recent_orders = v.get("recent_orders", []) or []
     for o in recent_orders:
         status = str(o.get("狀態", "-")).upper()
-        
-        # 狀態簡化 (與 UI 顯示邏輯一致)
+
         if "OVERDUE" in status: display = "OVERDUE"
         elif "DONE-C" in status: display = "DONE-C"
         elif "PLAN" in status or "APPROVED" in status: display = "APPD"
         elif "DONE" in status or "COMPLETED" in status: display = "CMP"
         elif "CANCEL" in status: display = "CANCEL"
         else: display = status
-        
+
         ship = o.get("船名", "-") or "-"
         dt = o.get("日期", pd.NaT)
         dt_str = dt.strftime('%m/%d') if pd.notnull(dt) else "-"
         imo = str(o.get("IMO", "")).strip()
         imo_val = imo if imo and imo not in ["-", "(本次無資料)", "nan", ""] else ""
-        
-        # 🌟 核心修改：A 欄位為「狀態(日期)-船名」，B 欄位為「IMO」，中間用 Tab 分隔
+
         lines.append(f"{display} ({dt_str}) - {ship}\t{imo_val}")
-            
-    # 使用 __NEWLINE__ 佔位符
+
     return "__NEWLINE__".join(lines)
 
-def render_fleet_map(vessel_summary_df: pd.DataFrame):
-    valid = vessel_summary_df.dropna(subset=["lat", "lon"]).copy()
-    if valid.empty:
-        st.info("目前沒有可顯示座標的船舶資料。")
-        return None
+def _add_vessel_marker(v, marker_cluster):
+    """建立單一船隻 marker（tooltip + popup + icon）並加入 cluster。"""
+    last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
+    match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
+    recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
 
-    valid["map_lon"] = valid["lon"].apply(lambda x: x + 360 if pd.notnull(x) and x < 0 else x)
-    center_lat = valid["lat"].mean()
-    center_lon = valid["map_lon"].mean()
+    plan_count = v.get('plan_count', 0)
+    done_count = v.get('done_count', 0)
+    label_color = _tooltip_style(v)
+    tooltip_html = f"<div style='color:{label_color}; font-size:8px; line-height:1.1;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
+    icon_hex = _icon_color_by_speed(v.get("matched"), v.get("speed", 0))
+    coord_str = _format_coord(v["lat"], v["lon"])
+    copy_text = _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str)
+    copy_text_attr = html.escape(copy_text, quote=True)
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
+    # 用 String.fromCharCode(10) 產生真實換行，避開轉義衝突
+    copy_btn_html = f'<button type="button" data-copytext="{copy_text_attr}" style="margin-top:6px; width:100%; padding:4px 0; font-size:11px; color:#1a73e8; background:#f1f6fe; border:1px solid #cfe0fb; border-radius:4px; cursor:pointer;" onclick="var t=this.getAttribute(\'data-copytext\').replace(/__NEWLINE__/g, String.fromCharCode(10)); var done=function(){{ this.textContent=\'✅ 已複製\'; var b=this; setTimeout(function(){{ b.textContent=\'📋 複製船舶資訊\'; }}, 1500); }}.bind(this); if(navigator.clipboard && navigator.clipboard.writeText){{ navigator.clipboard.writeText(t).then(done).catch(function(){{ var ta=document.createElement(\'textarea\'); ta.value=t; ta.style.position=\'fixed\'; ta.style.opacity=\'0\'; document.body.appendChild(ta); ta.focus(); ta.select(); try{{ document.execCommand(\'copy\'); }}catch(e){{}} document.body.removeChild(ta); }}); }}else{{ var ta=document.createElement(\'textarea\'); ta.value=t; ta.style.position=\'fixed\'; ta.style.opacity=\'0\'; document.body.appendChild(ta); ta.focus(); ta.select(); try{{ document.execCommand(\'copy\'); }}catch(e){{}} document.body.removeChild(ta); }} this.textContent=\'✅ 已複製\'; var b=this; setTimeout(function(){{ b.textContent=\'📋 複製船舶資訊\'; }}, 1500); ">📋 複製船舶資訊</button>'
 
-    # 🌟 船名標籤的縮小 CSS 直接注入地圖自己的 <head>（在 iframe 內部才會生效）
+    status_emoji_only = str(v.get('status', '')).split(' ')[0]
+    progress_bar_str = _progress_bar(done_count, plan_count)
+
+    popup_html = f"""
+    <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
+        <b style="font-size:14px;">{status_emoji_only} {v['油輪']}</b><br>
+        POS：{coord_str}<br>
+        HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn<br>
+        LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）<br>
+        <hr style="margin:6px 0;">
+        <div style="font-family:'Consolas','Courier New',monospace; font-size:12px; letter-spacing:1px;">
+            PLAN：{plan_count} ｜ DONE：{done_count} {progress_bar_str}
+        </div>
+        {recent_orders_html}
+        {match_line}
+        {copy_btn_html}
+    </div>
+    """
+    folium.Marker(
+        location=[v["lat"], v["map_lon"]],
+        tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
+        popup=folium.Popup(popup_html, max_width=280),
+        icon=_ship_div_icon(icon_hex, v.get("heading", 0) or 0),
+    ).add_to(marker_cluster)
+
+def _map_signature(valid_df: pd.DataFrame) -> str:
+    """只有影響地圖內容的欄位真的變了，簽章才會變 → 才會重建地圖。"""
+    cols = ["油輪", "lat", "lon", "speed", "heading", "matched", "ready_count",
+            "plan_count", "done_count", "status", "last_signal", "signal_hours"]
+    raw = valid_df[cols].astype(str).to_csv() + str(valid_df["recent_orders"].tolist())
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+@st.cache_resource(show_spinner="🗺️ 建立地圖中…", max_entries=2)
+def build_fleet_map(_summary_df: pd.DataFrame, sig: str):
+    """地圖物件只在 sig 改變時重建；其他重跑直接拿快取的同一個物件。"""
+    valid = _summary_df.dropna(subset=["lat", "lon"]).copy()
+    valid["map_lon"] = valid["lon"].apply(lambda x: x + 360 if x < 0 else x)
+
+    m = folium.Map(
+        location=[valid["lat"].mean(), valid["map_lon"].mean()],
+        zoom_start=3, tiles="CartoDB positron", prefer_canvas=True,
+    )
+
+    # 船名標籤縮小 CSS：注入地圖自己的 <head>（在 iframe 內才會生效）
     m.get_root().header.add_child(folium.Element("""
     <style>
     .leaflet-tooltip {
@@ -702,72 +623,34 @@ def render_fleet_map(vessel_summary_df: pd.DataFrame):
     </style>
     """))
 
-    for lat_line in range(-75, 76, 15):
-        folium.PolyLine([[lat_line, 0], [lat_line, 360]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
-    for lon_line in range(0, 361, 30):
-        folium.PolyLine([[-80, lon_line], [80, lon_line]], color="#8fa3af", weight=1.1, opacity=0.75, dash_array="6,4").add_to(m)
-
-    EdgeTickOverlay().add_to(m)
     _add_major_ports(m)
 
-    marker_cluster = MarkerCluster(options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}).add_to(m)
-
+    cluster = MarkerCluster(options={"maxClusterRadius": 50, "disableClusteringAtZoom": 6}).add_to(m)
     for _, v in valid.iterrows():
-        last_signal_str = v["last_signal"].strftime("%m/%d %H:%M") if pd.notnull(v["last_signal"]) else "-"
-        match_line = "" if v.get("matched") else '<div style="color:#d32f2f; margin-top:4px;">⚠️ 尚未配對到訂單資料</div>'
-        recent_orders_html = _build_recent_orders_html(v.get("recent_orders", []), v['油輪'])
+        _add_vessel_marker(v, cluster)
+    return m
 
-        plan_count = v.get('plan_count', 0)
-        done_count = v.get('done_count', 0)
-        label_color = _tooltip_style(v)
-        # 字級也直接寫在 inline style 當雙重保險，不只靠外部 CSS
-        tooltip_html = f"<div style='color:{label_color}; font-size:8px; line-height:1.1;'><i class='fa fa-ship'></i> {v['油輪']}</div>"
-        icon_hex = _icon_color_by_speed(v.get("matched"), v.get("speed", 0))
-        coord_str = _format_coord(v["lat"], v["lon"])
-        copy_text = _build_copy_text(v, plan_count, done_count, coord_str, last_signal_str)
-        copy_text_attr = html.escape(copy_text, quote=True)
+def render_fleet_map(vessel_summary_df: pd.DataFrame):
+    if vessel_summary_df is None or vessel_summary_df.empty or "lat" not in vessel_summary_df.columns:
+        st.info("目前沒有可顯示座標的船舶資料。")
+        return None
+    valid = vessel_summary_df.dropna(subset=["lat", "lon"])
+    if valid.empty:
+        st.info("目前沒有可顯示座標的船舶資料。")
+        return None
 
-        # 🌟 透過 String.fromCharCode(10) 來產生真實的換行符號，避開所有的轉義衝突
-        copy_btn_html = f'<button type="button" data-copytext="{copy_text_attr}" style="margin-top:6px; width:100%; padding:4px 0; font-size:11px; color:#1a73e8; background:#f1f6fe; border:1px solid #cfe0fb; border-radius:4px; cursor:pointer;" onclick="var t=this.getAttribute(\'data-copytext\').replace(/__NEWLINE__/g, String.fromCharCode(10)); var done=function(){{ this.textContent=\'✅ 已複製\'; var b=this; setTimeout(function(){{ b.textContent=\'📋 複製船舶資訊\'; }}, 1500); }}.bind(this); if(navigator.clipboard && navigator.clipboard.writeText){{ navigator.clipboard.writeText(t).then(done).catch(function(){{ var ta=document.createElement(\'textarea\'); ta.value=t; ta.style.position=\'fixed\'; ta.style.opacity=\'0\'; document.body.appendChild(ta); ta.focus(); ta.select(); try{{ document.execCommand(\'copy\'); }}catch(e){{}} document.body.removeChild(ta); }}); }}else{{ var ta=document.createElement(\'textarea\'); ta.value=t; ta.style.position=\'fixed\'; ta.style.opacity=\'0\'; document.body.appendChild(ta); ta.focus(); ta.select(); try{{ document.execCommand(\'copy\'); }}catch(e){{}} document.body.removeChild(ta); }} this.textContent=\'✅ 已複製\'; var b=this; setTimeout(function(){{ b.textContent=\'📋 複製船舶資訊\'; }}, 1500); ">📋 複製船舶資訊</button>'
-        
-        status_emoji_only = str(v.get('status', '')).split(' ')[0]
-        progress_bar_str = _progress_bar(done_count, plan_count)
-
-        popup_html = f"""
-        <div style="font-family:sans-serif; font-size:13px; min-width:220px;">
-            <b style="font-size:14px;">{status_emoji_only} {v['油輪']}</b><br>
-            POS：{coord_str}<br>
-            HDG {v['heading']:.0f}° ・ SPD {v['speed']:.1f}kn<br>
-            LSIG：{last_signal_str}（{v['signal_hours']:.1f}hr）<br>
-            <hr style="margin:6px 0;">
-            <div style="font-family:'Consolas','Courier New',monospace; font-size:12px; letter-spacing:1px;">
-                PLAN：{plan_count} ｜ DONE：{done_count} {progress_bar_str}
-            </div>
-            {recent_orders_html}
-            {match_line}
-            {copy_btn_html}
-        </div>
-        """
-        folium.Marker(
-            location=[v["lat"], v["map_lon"]],
-            tooltip=folium.Tooltip(tooltip_html, permanent=True, direction="right"),
-            popup=folium.Popup(popup_html, max_width=280),
-            icon=_ship_div_icon(icon_hex, v.get("heading", 0) or 0),
-        ).add_to(marker_cluster)
-
-    # 🌟 讓永久顯示的船名標籤本身也能點擊開啟 popup
-    TooltipClickOpensPopup().add_to(marker_cluster)
-
-    return st_folium(m, height=460, use_container_width=True, key="fleet_map", returned_objects=["last_object_clicked_tooltip"])
-
+    m = build_fleet_map(vessel_summary_df, _map_signature(valid))
+    return st_folium(
+        m, height=460, use_container_width=True,
+        key="fleet_map", returned_objects=["last_object_clicked_tooltip"],
+    )
 
 @st.fragment
 def render_map_section(vessel_summary_df: pd.DataFrame):
     """
-    🌟 地圖獨立成 fragment：
-    - 平常拖曳/縮放地圖，只有這個 fragment 會重跑，外層篩選器、表格完全不受影響。
-    - 只有真的點到船 marker（clicked_vessel 變動）時，才故意呼叫「不帶 scope」的
-      st.rerun()，觸發整頁重跑，讓外層篩選器 + 表格連動跳到該船的訂單。
+    地圖獨立成 fragment：
+    - 拖曳/縮放地圖只重跑這個 fragment。
+    - 只有真的點到新的船時，才呼叫不帶 scope 的 st.rerun()，讓篩選器 + 表格連動。
     """
     map_state = render_fleet_map(vessel_summary_df)
     clicked_vessel = None
@@ -783,7 +666,6 @@ def render_map_section(vessel_summary_df: pd.DataFrame):
         else:
             st.session_state["selected_tanker"] = "全部"
             st.toast(f"⚠️ {clicked_vessel} 尚未配對到任何訂單郵件")
-        # 不加 scope，故意觸發整頁重跑，讓外層篩選器 + 表格連動更新
         st.rerun()
 
 # ==========================================
@@ -829,7 +711,7 @@ def load_all_data():
     parse_errors = []
     DATA_DIR = 'data_John'
     if not os.path.exists(DATA_DIR): return pd.DataFrame(rows), parse_errors
-        
+
     EXCLUDE_FILES = {'checklist.md', 'schedule操作介面.md'}
     for root, _, files in os.walk(DATA_DIR):
         if any(ex in root for ex in ['.git', '.obsidian']): continue
@@ -910,6 +792,12 @@ def build_tanker_excel(full_df: pd.DataFrame) -> bytes:
             ws.freeze_panes = "A2"
         if not tankers: pd.DataFrame().to_excel(writer, sheet_name="無資料", index=False)
     return output.getvalue()
+
+def _excel_download_data(df: pd.DataFrame):
+    """新版 Streamlit 點下載才產生 Excel；舊版退回即時產生。"""
+    if _ST_SUPPORTS_LAZY_DOWNLOAD:
+        return lambda: build_tanker_excel(df)
+    return build_tanker_excel(df)
 
 def apply_split_layout(marker_id: str, n_selected: int):
     js = f"""
@@ -1003,9 +891,7 @@ def render_email_pane(container, row):
 @st.fragment
 def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywords: list):
     """
-    🌟 表格獨立成 fragment：
-    勾選列、下載、關閉預覽…等表格內部互動，只重跑這個 fragment，
-    上面的地圖不會被連帶重繪（不會跳動、不會重置視角）。
+    表格獨立成 fragment：勾選列、下載、關閉預覽等互動只重跑這裡，地圖不受影響。
     """
     if "df_key_counter" not in st.session_state: st.session_state.df_key_counter = 0
     DF_KEY = f"email_table_{st.session_state.df_key_counter}"
@@ -1031,22 +917,18 @@ def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywor
         def style_status(val):
             val_upper = str(val).upper().strip()
 
-            # 0.5 透明度背景 + 0.6 透明度字體
             if "OVERDUE" in val_upper: return "background-color: rgba(198, 40, 40, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             elif "EXTEND" in val_upper: return "background-color: rgba(92, 107, 192, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             elif "DONE-C" in val_upper: return "background-color: rgba(0, 137, 123, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
-
-            # PLAN 保持 0.8 背景 + 實心純白字體 (最顯眼)
             elif "APPROVED" in val_upper or "PLAN" in val_upper: return "background-color: rgba(251, 140, 0, 0.8); color: #ffffff; font-weight: bold;"
-
-            # 0.5 透明度背景 + 0.6 透明度字體
             elif "COMPLETED" in val_upper or "DONE" in val_upper: return "background-color: rgba(229, 57, 53, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             elif "CANCEL" in val_upper or "KYC" in val_upper: return "background-color: rgba(142, 36, 170, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
             elif "PENDING" in val_upper: return "background-color: rgba(117, 117, 117, 0.5); color: rgba(255, 255, 255, 0.6); font-weight: bold;"
 
             return ""
 
-        valid_dup_indices = _compute_duplicate_pair_indices(display_df)
+        # 只傳需要的欄位進 cache 函式，避免 hash 超長的「原始內文」
+        valid_dup_indices = _compute_duplicate_pair_indices(display_df[["油輪", "IMO", "狀態", "日期"]])
         def style_duplicate_imo(s): return ['background-color: rgba(253, 126, 20, 0.5);' if i in valid_dup_indices else '' for i in s.index]
 
         def style_search_match(val):
@@ -1072,7 +954,7 @@ def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywor
         st.markdown("<br>", unsafe_allow_html=True)
         exp_c1, exp_c2, exp_c3 = st.columns([1, 1, 1])
         with exp_c1: st.download_button(f"📊 匯出目前篩選 ({len(display_df)} 筆)", display_df.to_csv(index=False).encode('utf-8-sig'), "ship_report.csv", "text/csv")
-        with exp_c2: st.download_button(f"🗂️ 匯出全部資料", build_tanker_excel(display_df), "ship_report_by_tanker.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with exp_c2: st.download_button(f"🗂️ 匯出全部資料", _excel_download_data(display_df), "ship_report_by_tanker.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with exp_c3:
             if guess_has_selection:
                 if st.button("❌ 關閉預覽 (清除選取)", use_container_width=True):
@@ -1102,8 +984,7 @@ def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywor
         if i < len(preview_cols) and row_idx < len(display_df):
             render_email_pane(preview_cols[i], display_df.iloc[row_idx])
 
-    # 🌟 這裡改用 scope="fragment"：只是為了讓 split layout 的欄數（0/1/2欄）
-    # 即時跟上勾選狀態變化，屬於表格內部的排版修正，不應該波及地圖。
+    # 讓 split layout 欄數即時跟上勾選狀態；只重跑表格 fragment，不波及地圖
     if (n_selected == 0) != (not guess_has_selection):
         st.rerun(scope="fragment")
 
@@ -1114,97 +995,11 @@ def render_table_section(display_df: pd.DataFrame, search_kw: str, search_keywor
 st.markdown('<div class="compact-title">🚢 船隊實時調度報表</div>', unsafe_allow_html=True)
 
 df, parse_errors = load_all_data()
+df_sig = _df_signature(df)
 
-# ==========================================
-# === 為整個表格計算每個 IMO 的處理狀態 ===
-# ==========================================
+# 為每一列計算「處理」狀態（有 cache，不會每次重跑都重算）
 if not df.empty and "IMO" in df.columns:
-    final_statuses = []
-    
-    # 🌟 修正點 1：改為使用「油輪」和「IMO」同時作為分組鍵 (Composite Key)
-    # 這樣不同油輪即使遇到相同的 IMO，時間線也會被切開獨立計算
-    grouped_df = df.groupby(['油輪', 'IMO'])
-    
-    for idx, row in df.iterrows():
-        tanker = row.get("油輪")  # 🌟 取得當前行對應的油輪
-        imo = row.get("IMO")
-        raw_status = str(row.get('狀態', '-')).upper()
-        manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
-
-        # 🌟 新增：只要這封信被手動標記 status: close，該封信底下的所有 target
-        # （同一封信拆解出來的每一列）一律直接視為結案 (DONE)，優先權最高，
-        # 跳過後面所有 COMPLETED / CANCEL / APPROVED 的判斷。
-        if manual_status == 'close':
-            final_statuses.append("DONE")
-            continue
-
-        # 1. 無效 IMO 或本身就是結案狀態，直接給予對應狀態
-        if pd.isna(imo) or imo in ['-', '', '(本次無資料)']:
-            if "COMPLETED" in raw_status: final_statuses.append("DONE")
-            elif "CANCEL" in raw_status or "KYC" in raw_status: final_statuses.append("CANCEL")
-            elif "APPROVED" in raw_status: final_statuses.append("PLAN")
-            else: final_statuses.append(raw_status)
-            continue
-            
-        if "COMPLETED" in raw_status: 
-            final_statuses.append("DONE")
-            continue
-        if "CANCEL" in raw_status or "KYC" in raw_status:
-            final_statuses.append("CANCEL")
-            continue
-            
-        # 2. 核心邏輯：如果這封信是 APPROVED，則「往未來的時間」尋找是否有結案紀錄
-        if "APPROVED" in raw_status or "PLAN" in raw_status:
-            
-            t = row['日期']
-            if pd.isna(t):
-                final_statuses.append("PLAN")
-                continue
-                
-            # 🌟 修正點 2：提取時使用 (tanker, imo) 雙重條件來抓取這艘油輪專屬的時間線
-            try:
-                imo_group = grouped_df.get_group((tanker, imo))
-            except KeyError:
-                imo_group = pd.DataFrame(columns=df.columns)
-                
-            future_events = imo_group[imo_group['日期'] >= t]
-            
-            comp_ev = future_events[future_events['狀態'].str.contains("COMPLETED", case=False, na=False)]
-            canc_ev = future_events[future_events['狀態'].str.contains("CANCEL", case=False, na=False)]
-            reschedule_ev = future_events[
-                (future_events['狀態'].str.contains("APPROVED", case=False, na=False))
-                & (future_events['日期'] > t)
-            ]
-            
-            first_comp = comp_ev['日期'].min() if not comp_ev.empty else pd.NaT
-            first_canc = canc_ev['日期'].min() if not canc_ev.empty else pd.NaT
-            first_reschedule = reschedule_ev['日期'].min() if not reschedule_ev.empty else pd.NaT
-            
-            cands = []
-            if pd.notnull(first_comp): cands.append(("DONE", first_comp))
-            if pd.notnull(first_canc): cands.append(("CANCEL", first_canc))
-            if pd.notnull(first_reschedule): cands.append(("EXTEND", first_reschedule))
-            
-            if not cands:
-                # 🌟 當找不到未來的結案信（原本要卡在 PLAN 時），才檢查手動 clear
-                manual_status = str(row.get('手動狀態', 'pending')).strip().lower()
-                if manual_status == 'clear':
-                    final_statuses.append("DONE-C")
-                else:
-                    tz_info = t.tzinfo if hasattr(t, 'tzinfo') else None
-                    now = pd.Timestamp.now(tz=tz_info)
-                    if (now - t).days > 14:
-                        final_statuses.append("OVERDUE")
-                    else:
-                        final_statuses.append("PLAN")
-            else:
-                final_statuses.append(min(cands, key=lambda x: x[1])[0])
-            continue
-            
-        # 其他狀態 (如 PENDING) 原樣輸出
-        final_statuses.append(raw_status)
-        
-    df["處理"] = final_statuses
+    df["處理"] = compute_process_status(df, df_sig)
 else:
     df["處理"] = "-"
 
@@ -1233,12 +1028,12 @@ if log:
 
 if not df.empty:
     vessel_pos_df = load_vessel_positions()
-    vessel_summary_df = build_vessel_summary(df, vessel_pos_df)
+    vessel_summary_df = build_vessel_summary(df, vessel_pos_df, df_sig, _pos_signature(vessel_pos_df))
 
     if "selected_tanker" not in st.session_state: st.session_state["selected_tanker"] = "全部"
 
     c1, c2, c3, c4 = st.columns([1, 1, 1.2, 1.2])
-    
+
     with c1:
         tankers = ["全部"] + sorted([x for x in df["油輪"].unique() if x])
         if st.session_state["selected_tanker"] not in tankers: st.session_state["selected_tanker"] = "全部"
@@ -1246,23 +1041,23 @@ if not df.empty:
             if "tanker_select_widget" in st.session_state:
                 st.session_state["selected_tanker"] = st.session_state.tanker_select_widget
         st.selectbox(
-            "🚢 篩選油輪", 
-            tankers, 
+            "🚢 篩選油輪",
+            tankers,
             index=tankers.index(st.session_state["selected_tanker"]) if st.session_state["selected_tanker"] in tankers else 0,
             key="tanker_select_widget",
             on_change=_on_tanker_change
         )
-        
+
     with c2:
         dynamic_statuses = ["全部"] + sorted(list(df["狀態"].unique()))
         sel_status = st.selectbox("📂 篩選狀態", dynamic_statuses)
-        
+
     with c3:
         valid_dates = df["日期"].dropna()
         m_date = valid_dates.min().date() if not valid_dates.empty else datetime.today().date()
         x_date = valid_dates.max().date() if not valid_dates.empty else datetime.today().date()
         sel_range = st.date_input("📅 日期範圍", value=(m_date, x_date))
-        
+
     with c4:
         search_kw = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋船名、IMO、主旨、內文...", key="main_search_input")
 
@@ -1279,12 +1074,12 @@ if not df.empty:
         search_keywords = [k.strip() for k in search_kw.split() if k.strip()]
         missing_keywords = []
         combined_kw_mask = pd.Series([False] * len(df))
-        
+
         for kw in search_keywords:
             kw_mask = df[search_cols].astype(str).apply(lambda col: col.str.contains(kw, case=False, na=False, regex=False)).any(axis=1)
             if not kw_mask.any(): missing_keywords.append(kw)
             else: combined_kw_mask |= kw_mask
-                
+
         if missing_keywords: st.warning(f"⚠️ 提示：以下字串不在表格中： **{', '.join(missing_keywords)}**", icon="🚨")
         if combined_kw_mask.any(): mask &= combined_kw_mask
         elif missing_keywords: mask &= False
